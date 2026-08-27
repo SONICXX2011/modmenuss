@@ -1,25 +1,34 @@
+#include <list>
+#include <vector>
+#include <cstring>
+#include <pthread.h>
+#include <thread>
 #include <string>
 #include <jni.h>
 #include <unistd.h>
 #include <fstream>
-#include <thread>
+#include <sstream>
 #include <chrono>
 #include <ctime>
-#include <sstream>
-#include <vector>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
 #include "Menu/Menu.hpp"
 #include "Menu/Jni.hpp"
+#include "Includes/Macros.h"
+#include "dobby.h"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
+
+// ======================== آفست‌ها (از دامپ) ========================
+#define OFFSET_IP_INPUT       0xD8  // آفست ipInput در MenuControl/GtaMenuControl
+#define OFFSET_HOST_BUTTON    0x70
+#define OFFSET_JOIN_BUTTON    0x78
+#define OFFSET_SERVER_LIST    0x80
 
 // ======================== مسیرها ========================
 static std::string g_captureLog = "/sdcard/Download/capture_log.txt";
 static std::string g_debugLog = "/sdcard/Download/capture_debug.txt";
-
-// ======================== متغیرها ========================
 static std::string g_lastCapture = "";
 static bool g_captureMode = false;
 
@@ -81,96 +90,83 @@ static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int len
     env->DeleteLocalRef(toast);
 }
 
-// ======================== کپچر امن (بدون کرش) ========================
-static void safe_capture_all(JNIEnv *env, jobject obj) {
+// ======================== کپچر مستقیم با آفست (بدون کلاس) ========================
+static void capture_by_offset(JNIEnv *env, jobject obj) {
     std::stringstream result;
-    result << "========== CAPTURE REPORT ==========\n";
+    result << "========== CAPTURE BY OFFSET ==========\n";
     result << "Time: " << get_time() << "\n\n";
+    result << "📡 Capturing offsets from libil2cpp.so\n";
+    result << "   IP Input offset: 0x" << std::hex << OFFSET_IP_INPUT << "\n";
+    result << "   Host Button offset: 0x" << std::hex << OFFSET_HOST_BUTTON << "\n";
+    result << "   Join Button offset: 0x" << std::hex << OFFSET_JOIN_BUTTON << "\n\n";
     
-    // لیست کلاس‌هایی که احتمال دارن توی بازی باشن
-    std::vector<std::string> classNames = {
-        "GtaMenuControl",
-        "ServerListAccess", 
-        "AutoRunLinuxServer",
-        "CustomNetworkManager",
-        "MenuControl",
-        "PauseMenu",
-        "CustomCode",
-        "ModManager",
-        "ServerGameManager"
-    };
+    // ====== گرفتن آدرس base libil2cpp.so ======
+    uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+    if (baseAddr == 0) {
+        result << "❌ Failed to get libil2cpp.so base address!\n";
+        write_capture(result.str());
+        show_toast(env, obj, "libil2cpp.so not loaded!", 0);
+        return;
+    }
+    result << "✅ libil2cpp.so base: 0x" << std::hex << baseAddr << "\n\n";
     
-    int foundCount = 0;
-    result << "🔍 Searching for classes...\n\n";
+    // ====== خواندن حافظه از آفست‌ها ======
+    uintptr_t ipInputAddr = baseAddr + OFFSET_IP_INPUT;
+    uintptr_t hostButtonAddr = baseAddr + OFFSET_HOST_BUTTON;
+    uintptr_t joinButtonAddr = baseAddr + OFFSET_JOIN_BUTTON;
     
-    for (const auto& className : classNames) {
-        // با ExceptionClear امن شده
-        jclass targetClass = env->FindClass(className.c_str());
-        if (targetClass == nullptr) {
-            env->ExceptionClear();
-            result << "❌ " << className << " → NOT FOUND\n";
-            continue;
-        }
-        
-        foundCount++;
-        result << "✅ " << className << " → FOUND\n";
-        
-        // گرفتن instance
-        jclass unityObjectClass = env->FindClass("UnityEngine/Object");
-        if (unityObjectClass != nullptr) {
-            jmethodID findObjectMethod = env->GetStaticMethodID(
-                unityObjectClass,
-                "FindObjectOfType",
-                "(Ljava/lang/Class;)Ljava/lang/Object;"
-            );
-            if (findObjectMethod != nullptr) {
-                jobject instance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, targetClass);
-                if (instance != nullptr) {
-                    result << "   ├─ Instance: " << instance << " (exists)\n";
-                    
-                    // گرفتن GameObject
-                    jclass monoBehaviourClass = env->FindClass("UnityEngine/MonoBehaviour");
-                    if (monoBehaviourClass != nullptr && env->IsInstanceOf(instance, monoBehaviourClass)) {
-                        jmethodID getGameObject = env->GetMethodID(monoBehaviourClass, "get_gameObject", "()LUnityEngine/GameObject;");
-                        if (getGameObject != nullptr) {
-                            jobject gameObject = env->CallObjectMethod(instance, getGameObject);
-                            if (gameObject != nullptr) {
-                                jmethodID getObjectName = env->GetMethodID(env->FindClass("UnityEngine/GameObject"), "get_name", "()Ljava/lang/String;");
-                                if (getObjectName != nullptr) {
-                                    jstring nameObj = (jstring)env->CallObjectMethod(gameObject, getObjectName);
-                                    const char* nameCStr = env->GetStringUTFChars(nameObj, nullptr);
-                                    result << "   └─ GameObject: " << nameCStr << "\n";
-                                    env->ReleaseStringUTFChars(nameObj, nameCStr);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    result << "   └─ Instance: null (not created yet)\n";
-                }
-            }
-        }
-        result << "\n";
+    result << "🔍 Reading memory...\n";
+    result << "   ipInput address: 0x" << std::hex << ipInputAddr << "\n";
+    result << "   hostButton address: 0x" << std::hex << hostButtonAddr << "\n";
+    result << "   joinButton address: 0x" << std::hex << joinButtonAddr << "\n\n";
+    
+    // ====== خواندن مقادیر ======
+    void *ipInputPtr = (void*)ipInputAddr;
+    void *hostButtonPtr = (void*)hostButtonAddr;
+    void *joinButtonPtr = (void*)joinButtonAddr;
+    
+    result << "📊 Values:\n";
+    
+    // خواندن ipInput (pointer)
+    uintptr_t ipInputValue = 0;
+    memcpy(&ipInputValue, ipInputPtr, sizeof(uintptr_t));
+    result << "   ipInput value: 0x" << std::hex << ipInputValue << "\n";
+    
+    // خواندن hostButton (pointer)
+    uintptr_t hostButtonValue = 0;
+    memcpy(&hostButtonValue, hostButtonPtr, sizeof(uintptr_t));
+    result << "   hostButton value: 0x" << std::hex << hostButtonValue << "\n";
+    
+    // خواندن joinButton (pointer)
+    uintptr_t joinButtonValue = 0;
+    memcpy(&joinButtonValue, joinButtonPtr, sizeof(uintptr_t));
+    result << "   joinButton value: 0x" << std::hex << joinButtonValue << "\n\n";
+    
+    // ====== خواندن رشته از ipInput (اگر pointer معتبر باشه) ======
+    if (ipInputValue != 0) {
+        // خواندن 50 بایت از آدرس ipInputValue
+        char buffer[51] = {0};
+        memcpy(buffer, (void*)ipInputValue, 50);
+        result << "   🔤 IP Input string: \"" << buffer << "\"\n";
+    } else {
+        result << "   🔤 IP Input string: (null)\n";
     }
     
-    result << "📊 Summary: " << foundCount << " classes found out of " << classNames.size() << "\n";
-    result << "========================================\n";
+    result << "\n========================================\n";
     
     g_lastCapture = result.str();
     write_capture(result.str());
-    write_debug("Capture completed, found " + std::to_string(foundCount) + " classes");
-    
-    std::string toastMsg = "✅ " + std::to_string(foundCount) + " classes found!\nCheck: /sdcard/Download/capture_log.txt";
-    show_toast(env, obj, toastMsg, 1);
+    write_debug("Capture by offset completed");
+    show_toast(env, obj, "✅ Capture done!\nCheck: /sdcard/Download/capture_log.txt", 1);
 }
 
-// ======================== منو (بدون آیپی) ========================
+// ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_📡 Capture Tool"),
         OBFUSCATE("Toggle_Capture Mode"),              // featNum: 0
-        OBFUSCATE("Button_📡 Capture All Classes"),    // featNum: 1
+        OBFUSCATE("Button_📡 Capture Offsets"),        // featNum: 1
         OBFUSCATE("Button_Show Last Capture"),         // featNum: 2
         OBFUSCATE("Button_Clear Logs"),                // featNum: 3
         OBFUSCATE("RichTextView_Status: <font color='yellow'>Ready</font>"),
@@ -194,14 +190,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             show_toast(env, obj, g_captureMode ? "✅ Capture Mode: ON" : "❌ Capture Mode: OFF", 0);
             break;
 
-        case 1: // Button_📡 Capture All Classes
-            show_toast(env, obj, "🔄 Capturing...", 0);
-            safe_capture_all(env, obj);
+        case 1: // Button_📡 Capture Offsets
+            show_toast(env, obj, "🔄 Capturing offsets...", 0);
+            capture_by_offset(env, obj);
             break;
 
         case 2: // Button_Show Last Capture
             if (!g_lastCapture.empty()) {
-                // فقط خط اول رو توی Toast نشون بده
                 std::string firstLine = g_lastCapture.substr(0, g_lastCapture.find('\n'));
                 if (firstLine.length() > 80) firstLine = firstLine.substr(0, 80) + "...";
                 show_toast(env, obj, "📄 " + firstLine, 1);
