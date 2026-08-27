@@ -7,7 +7,6 @@
 #include <ctime>
 #include <sstream>
 #include <vector>
-#include <map>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -19,10 +18,8 @@
 // ======================== مسیرها ========================
 static std::string g_captureLog = "/sdcard/Download/capture_log.txt";
 static std::string g_debugLog = "/sdcard/Download/capture_debug.txt";
-static std::string g_lastIPFile = "/sdcard/Download/last_ip.txt";
 
 // ======================== متغیرها ========================
-static std::string g_targetIP = "";
 static std::string g_lastCapture = "";
 static bool g_captureMode = false;
 
@@ -84,37 +81,98 @@ static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int len
     env->DeleteLocalRef(toast);
 }
 
-// ======================== کپچر رویداد (با هوک خودکار) ========================
-static void capture_event(JNIEnv *env, const char* className, const char* methodName, const char* params) {
-    if (!g_captureMode) return;
+// ======================== کپچر امن (بدون کرش) ========================
+static void safe_capture_all(JNIEnv *env, jobject obj) {
+    std::stringstream result;
+    result << "========== CAPTURE REPORT ==========\n";
+    result << "Time: " << get_time() << "\n\n";
     
-    std::stringstream ss;
-    ss << "📡 EVENT CAPTURED\n";
-    ss << "  Class: " << className << "\n";
-    ss << "  Method: " << methodName << "\n";
-    ss << "  Params: " << (params ? params : "()") << "\n";
-    ss << "  Time: " << get_time() << "\n";
-    ss << "----------------------------------------\n";
+    // لیست کلاس‌هایی که احتمال دارن توی بازی باشن
+    std::vector<std::string> classNames = {
+        "GtaMenuControl",
+        "ServerListAccess", 
+        "AutoRunLinuxServer",
+        "CustomNetworkManager",
+        "MenuControl",
+        "PauseMenu",
+        "CustomCode",
+        "ModManager",
+        "ServerGameManager"
+    };
     
-    std::string result = ss.str();
-    g_lastCapture = result;
-    write_capture(result);
-    write_debug(("Event: " + std::string(className) + "::" + methodName).c_str());
+    int foundCount = 0;
+    result << "🔍 Searching for classes...\n\n";
+    
+    for (const auto& className : classNames) {
+        // با ExceptionClear امن شده
+        jclass targetClass = env->FindClass(className.c_str());
+        if (targetClass == nullptr) {
+            env->ExceptionClear();
+            result << "❌ " << className << " → NOT FOUND\n";
+            continue;
+        }
+        
+        foundCount++;
+        result << "✅ " << className << " → FOUND\n";
+        
+        // گرفتن instance
+        jclass unityObjectClass = env->FindClass("UnityEngine/Object");
+        if (unityObjectClass != nullptr) {
+            jmethodID findObjectMethod = env->GetStaticMethodID(
+                unityObjectClass,
+                "FindObjectOfType",
+                "(Ljava/lang/Class;)Ljava/lang/Object;"
+            );
+            if (findObjectMethod != nullptr) {
+                jobject instance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, targetClass);
+                if (instance != nullptr) {
+                    result << "   ├─ Instance: " << instance << " (exists)\n";
+                    
+                    // گرفتن GameObject
+                    jclass monoBehaviourClass = env->FindClass("UnityEngine/MonoBehaviour");
+                    if (monoBehaviourClass != nullptr && env->IsInstanceOf(instance, monoBehaviourClass)) {
+                        jmethodID getGameObject = env->GetMethodID(monoBehaviourClass, "get_gameObject", "()LUnityEngine/GameObject;");
+                        if (getGameObject != nullptr) {
+                            jobject gameObject = env->CallObjectMethod(instance, getGameObject);
+                            if (gameObject != nullptr) {
+                                jmethodID getObjectName = env->GetMethodID(env->FindClass("UnityEngine/GameObject"), "get_name", "()Ljava/lang/String;");
+                                if (getObjectName != nullptr) {
+                                    jstring nameObj = (jstring)env->CallObjectMethod(gameObject, getObjectName);
+                                    const char* nameCStr = env->GetStringUTFChars(nameObj, nullptr);
+                                    result << "   └─ GameObject: " << nameCStr << "\n";
+                                    env->ReleaseStringUTFChars(nameObj, nameCStr);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    result << "   └─ Instance: null (not created yet)\n";
+                }
+            }
+        }
+        result << "\n";
+    }
+    
+    result << "📊 Summary: " << foundCount << " classes found out of " << classNames.size() << "\n";
+    result << "========================================\n";
+    
+    g_lastCapture = result.str();
+    write_capture(result.str());
+    write_debug("Capture completed, found " + std::to_string(foundCount) + " classes");
+    
+    std::string toastMsg = "✅ " + std::to_string(foundCount) + " classes found!\nCheck: /sdcard/Download/capture_log.txt";
+    show_toast(env, obj, toastMsg, 1);
 }
 
-// ======================== دکمه‌های منو ========================
+// ======================== منو (بدون آیپی) ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP Address"),           // featNum: 0
-        
-        OBFUSCATE("Toggle_Capture Mode"),                  // featNum: 1
-        OBFUSCATE("Button_📡 Capture Now"),                // featNum: 2
-        OBFUSCATE("Button_Show Last Capture"),             // featNum: 3
-        OBFUSCATE("Button_Clear Logs"),                    // featNum: 4
-        
-        OBFUSCATE("Button_Show Saved IP"),                 // featNum: 5
+        OBFUSCATE("Category_📡 Capture Tool"),
+        OBFUSCATE("Toggle_Capture Mode"),              // featNum: 0
+        OBFUSCATE("Button_📡 Capture All Classes"),    // featNum: 1
+        OBFUSCATE("Button_Show Last Capture"),         // featNum: 2
+        OBFUSCATE("Button_Clear Logs"),                // featNum: 3
         OBFUSCATE("RichTextView_Status: <font color='yellow'>Ready</font>"),
     };
     int total = sizeof features / sizeof features[0];
@@ -129,79 +187,21 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
-    const char *textStr = nullptr;
-    if (text != nullptr) {
-        textStr = env->GetStringUTFChars(text, nullptr);
-    }
-
     switch (featNum) {
-        case 0: // Input IP
-            if (textStr != nullptr) {
-                g_targetIP = textStr;
-                std::ofstream f(g_lastIPFile);
-                if (f.is_open()) {
-                    f << g_targetIP << "\n";
-                    f.close();
-                }
-                show_toast(env, obj, "IP saved: " + g_targetIP, 0);
-                write_debug("IP saved: " + g_targetIP);
-            }
-            break;
-
-        case 1: // Toggle Capture Mode
+        case 0: // Toggle Capture Mode
             g_captureMode = (bool)boolean;
             write_debug(g_captureMode ? "Capture Mode: ON" : "Capture Mode: OFF");
             show_toast(env, obj, g_captureMode ? "✅ Capture Mode: ON" : "❌ Capture Mode: OFF", 0);
             break;
 
-        case 2: // Button_📡 Capture Now
-            {
-                show_toast(env, obj, "🔄 Capturing current event...", 0);
-                
-                // کپچر از کلاس‌های مختلف
-                std::vector<std::string> classes = {"MenuControl", "GtaMenuControl", "ServerListAccess", "AutoRunLinuxServer"};
-                std::string allResults = "========== CAPTURE ALL ==========\n";
-                allResults += "Time: " + get_time() + "\n\n";
-                
-                for (const auto& className : classes) {
-                    // تلاش برای پیدا کردن کلاس
-                    jclass targetClass = env->FindClass(className.c_str());
-                    if (targetClass != nullptr) {
-                        allResults += "✅ Class found: " + className + "\n";
-                        allResults += "   Instance: " + std::to_string((uintptr_t)targetClass) + "\n";
-                        
-                        // گرفتن instance
-                        jclass unityObjectClass = env->FindClass("UnityEngine/Object");
-                        if (unityObjectClass != nullptr) {
-                            jmethodID findObjectMethod = env->GetStaticMethodID(
-                                unityObjectClass,
-                                "FindObjectOfType",
-                                "(Ljava/lang/Class;)Ljava/lang/Object;"
-                            );
-                            if (findObjectMethod != nullptr) {
-                                jobject instance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, targetClass);
-                                if (instance != nullptr) {
-                                    allResults += "   Instance found: " + std::to_string((uintptr_t)instance) + "\n";
-                                } else {
-                                    allResults += "   Instance: null (not created yet)\n";
-                                }
-                            }
-                        }
-                    } else {
-                        allResults += "❌ Class not found: " + className + "\n";
-                    }
-                    allResults += "\n";
-                }
-                
-                g_lastCapture = allResults;
-                write_capture(allResults);
-                show_toast(env, obj, "✅ Capture completed!\nCheck: /sdcard/Download/capture_log.txt", 1);
-                write_debug("Manual capture completed");
-            }
+        case 1: // Button_📡 Capture All Classes
+            show_toast(env, obj, "🔄 Capturing...", 0);
+            safe_capture_all(env, obj);
             break;
 
-        case 3: // Show Last Capture
+        case 2: // Button_Show Last Capture
             if (!g_lastCapture.empty()) {
+                // فقط خط اول رو توی Toast نشون بده
                 std::string firstLine = g_lastCapture.substr(0, g_lastCapture.find('\n'));
                 if (firstLine.length() > 80) firstLine = firstLine.substr(0, 80) + "...";
                 show_toast(env, obj, "📄 " + firstLine, 1);
@@ -210,7 +210,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 4: // Clear Logs
+        case 3: // Button_Clear Logs
             {
                 std::ofstream f1(g_captureLog);
                 if (f1.is_open()) {
@@ -228,37 +228,10 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 5: // Show Saved IP
-            {
-                std::ifstream f(g_lastIPFile);
-                if (f.is_open()) {
-                    std::string ip;
-                    std::getline(f, ip);
-                    f.close();
-                    if (!ip.empty()) {
-                        show_toast(env, obj, "Saved IP: " + ip, 1);
-                    } else {
-                        show_toast(env, obj, "No saved IP!", 0);
-                    }
-                } else {
-                    show_toast(env, obj, "No saved IP!", 0);
-                }
-            }
-            break;
-
         default:
+            write_debug("Unknown featNum: " + std::to_string(featNum));
             break;
     }
-
-    if (textStr != nullptr) {
-        env->ReleaseStringUTFChars(text, textStr);
-    }
-}
-
-// ======================== هوک‌های خودکار برای کپچر رویدادها ========================
-// این تابع توسط هوک‌ها صدا زده میشه
-extern "C" void on_event_captured(JNIEnv *env, const char* className, const char* methodName, const char* params) {
-    capture_event(env, className, methodName, params);
 }
 
 // ======================== ترد اصلی ========================
@@ -274,17 +247,6 @@ void hack_thread() {
         return;
     }
     write_debug("libil2cpp.so loaded!");
-    
-    std::ifstream f(g_lastIPFile);
-    if (f.is_open()) {
-        std::string ip;
-        std::getline(f, ip);
-        f.close();
-        if (!ip.empty()) {
-            g_targetIP = ip;
-            write_debug("Loaded saved IP: " + ip);
-        }
-    }
 }
 
 // ======================== تابع ورودی ========================
