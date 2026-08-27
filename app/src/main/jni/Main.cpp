@@ -8,8 +8,6 @@
 #include <iomanip>
 #include <cstring>
 #include <signal.h>
-#include <cxxabi.h>
-#include <execinfo.h>
 #include <sys/stat.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
@@ -22,7 +20,7 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ) ========================
+// ======================== آفست‌ها ========================
 #define OFFSET_IP_INPUT  0xC0
 #define OFFSET_IP_INPUT2 0xD8
 #define OFFSET_IP_INPUT3 0x80
@@ -40,68 +38,7 @@ static std::string g_offsetLog = g_basePath + "offset_data.txt";
 static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
 
-// ======================== ایجاد پوشه ========================
-static void create_directory() {
-    mkdir(g_basePath.c_str(), 0777);
-}
-
-// ======================== هندلر کرش ========================
-static void crash_handler(int sig, siginfo_t *info, void *context) {
-    std::ofstream f(g_crashLog, std::ios::app);
-    if (f.is_open()) {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        f << "\n========================================\n";
-        f << "💥 CRASH at " << std::ctime(&time_t);
-        f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
-        f << "Fault address: " << info->si_addr << "\n";
-        f << "========================================\n";
-        
-        void *buffer[50];
-        int nptrs = backtrace(buffer, 50);
-        char **strings = backtrace_symbols(buffer, nptrs);
-        if (strings) {
-            f << "\n📚 Backtrace:\n";
-            for (int i = 0; i < nptrs; i++) {
-                f << "  #" << i << " " << strings[i] << "\n";
-            }
-            free(strings);
-        }
-        f << "========================================\n\n";
-        f.close();
-    }
-    
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static void install_crash_handler() {
-    if (g_crashHandlerInstalled) return;
-    
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO | SA_RESTART;
-    sigemptyset(&sa.sa_mask);
-    
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGABRT, &sa, nullptr);
-    sigaction(SIGFPE, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    
-    g_crashHandlerInstalled = true;
-    
-    std::ofstream f(g_crashLog);
-    if (f.is_open()) {
-        f << "========== CRASH HANDLER ==========\n";
-        f << "Time: " << get_time() << "\n";
-        f << "==================================\n\n";
-        f.close();
-    }
-}
-
-// ======================== توابع کمکی ========================
+// ======================== توابع کمکی (قبل از استفاده) ========================
 static std::string get_time() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -123,13 +60,48 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
+// ======================== ایجاد پوشه ========================
+static void create_directory() {
+    mkdir(g_basePath.c_str(), 0777);
+}
+
+// ======================== هندلر کرش (بدون backtrace) ========================
+static void crash_handler(int sig, siginfo_t *info, void *context) {
+    std::ofstream f(g_crashLog, std::ios::app);
+    if (f.is_open()) {
+        f << "\n========================================\n";
+        f << "💥 CRASH at " << get_time() << "\n";
+        f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
+        f << "Fault address: " << info->si_addr << "\n";
+        f << "========================================\n\n";
+        f.close();
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handler() {
+    if (g_crashHandlerInstalled) return;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGFPE, &sa, nullptr);
+    sigaction(SIGILL, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    g_crashHandlerInstalled = true;
+}
+
+// ======================== ذخیره و بارگذاری IP ========================
 static void save_ip(const std::string& ip) {
     std::ofstream f(g_lastIPFile);
     if (f.is_open()) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
-        write_log(g_ipResultLog, "✅ IP SAVED: " + ip);
     }
 }
 
@@ -152,16 +124,13 @@ static void capture_offsets(JNIEnv *env, jobject obj) {
         write_log(g_offsetLog, "Time: " + get_time());
         
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        std::string baseInfo = "libil2cpp.so base: 0x" + std::to_string(baseAddr);
-        write_debug(baseInfo);
-        write_log(g_offsetLog, baseInfo);
+        write_log(g_offsetLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
         
         if (baseAddr == 0) {
             write_log(g_offsetLog, "❌ libil2cpp.so not loaded!");
             return;
         }
         
-        // ====== آفست‌های IP ======
         uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
         const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
         
@@ -177,14 +146,11 @@ static void capture_offsets(JNIEnv *env, jobject obj) {
             if (ptr != 0) {
                 char buffer[256] = {0};
                 memcpy(buffer, (void*)ptr, 50);
-                std::string value = "   Value: \"" + std::string(buffer) + "\"";
-                write_debug(value);
-                write_log(g_offsetLog, value);
+                write_log(g_offsetLog, "   Value: \"" + std::string(buffer) + "\"");
             }
         }
         
         write_log(g_offsetLog, "========== CAPTURE END ==========");
-        write_debug("========== CAPTURE END ==========");
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in capture_offsets!");
     }
