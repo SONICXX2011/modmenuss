@@ -135,7 +135,7 @@ static void inject_ip_with_class(JNIEnv *env, jobject obj, const std::string& ip
 
     jobject inputField = env->GetObjectField(instance, field);
     if (inputField == nullptr) {
-        show_toast(env, obj, fieldName + " is null!", 0);
+        show_toast(env, obj, std::string(fieldName) + " is null!", 0);
         return;
     }
 
@@ -229,7 +229,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         case 4: // Button_Apply: AutoRunLinuxServer (از طریق _menuControl)
             if (g_targetIP.empty()) g_targetIP = load_ip_from_file();
             if (!g_targetIP.empty()) {
-                // این یکی خاصه: اول AutoRunLinuxServer رو پیدا میکنه، بعد _menuControl رو میگیره
                 jclass targetClass = env->FindClass("AutoRunLinuxServer");
                 if (targetClass == nullptr) {
                     show_toast(env, obj, "AutoRunLinuxServer not found!", 0);
