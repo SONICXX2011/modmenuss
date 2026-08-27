@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -15,11 +16,20 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== متغیرهای سراسری ========================
-static std::string g_targetIP = "";
+// ======================== آفست‌ها ========================
+#define OFFSET_IP_INPUT  0xC0
+#define OFFSET_IP_INPUT2 0xD8
+#define OFFSET_IP_INPUT3 0x80
+
+// ======================== مسیرها ========================
 static std::string g_debugLog = "/sdcard/Download/mod_debug.txt";
 static std::string g_lastIPFile = "/sdcard/Download/last_ip.txt";
-static bool g_menuReady = false;
+static std::string g_captureLog = "/sdcard/Download/capture_log.txt";
+static std::string g_ipResultLog = "/sdcard/Download/ip_result.txt";
+
+// ======================== متغیرها ========================
+static std::string g_targetIP = "";
+static std::string g_lastAction = "";
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -30,12 +40,16 @@ static std::string get_time() {
     return time_str;
 }
 
-static void write_debug(const std::string& msg) {
-    std::ofstream f(g_debugLog, std::ios::app);
+static void write_log(const std::string& file, const std::string& msg) {
+    std::ofstream f(file, std::ios::app);
     if (f.is_open()) {
         f << "[" << get_time() << "] " << msg << "\n";
         f.close();
     }
+}
+
+static void write_debug(const std::string& msg) {
+    write_log(g_debugLog, msg);
     LOGI("[Debug] %s", msg.c_str());
 }
 
@@ -77,6 +91,7 @@ static void save_ip(const std::string& ip) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
+        write_log(g_ipResultLog, "✅ IP SAVED: " + ip);
     }
 }
 
@@ -91,134 +106,105 @@ static std::string load_ip() {
     return "";
 }
 
-// ======================== تزریق IP (امن‌ترین روش) ========================
-static void inject_ip_to_game(JNIEnv *env, jobject obj) {
-    // چک اولیه
-    if (env == nullptr || obj == nullptr) {
-        write_debug("❌ inject_ip_to_game: env or obj is null");
+// ======================== کپچر کامل ========================
+static void capture_everything(JNIEnv *env, jobject obj) {
+    write_debug("========== CAPTURE START ==========");
+    write_log(g_captureLog, "========== CAPTURE START ==========");
+    
+    // ۱. اطلاعات base address
+    uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+    std::string baseInfo = "libil2cpp.so base: 0x" + std::to_string(baseAddr);
+    write_debug(baseInfo);
+    write_log(g_captureLog, baseInfo);
+    
+    if (baseAddr == 0) {
+        write_log(g_captureLog, "❌ Failed to get base address!");
         return;
     }
     
-    // بارگذاری IP
+    // ۲. چک کردن آفست‌ها
+    uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
+    const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
+    
+    for (int i = 0; i < 3; i++) {
+        uintptr_t addr = baseAddr + offsets[i];
+        uintptr_t ptr = 0;
+        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+        
+        std::string msg = "Offset " + std::string(offsetNames[i]) + " at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr);
+        write_debug(msg);
+        write_log(g_captureLog, msg);
+        
+        if (ptr != 0) {
+            char buffer[256] = {0};
+            memcpy(buffer, (void*)ptr, 50);
+            std::string value = "   Value: \"" + std::string(buffer) + "\"";
+            write_debug(value);
+            write_log(g_captureLog, value);
+        }
+    }
+    
+    // ۳. اطلاعات IP
+    std::string ipInfo = "Current IP: " + g_targetIP;
+    write_debug(ipInfo);
+    write_log(g_captureLog, ipInfo);
+    
+    // ۴. اطلاعات فایل‌ها
+    std::string fileInfo = "Log files: " + g_debugLog + ", " + g_lastIPFile + ", " + g_captureLog;
+    write_debug(fileInfo);
+    write_log(g_captureLog, fileInfo);
+    
+    write_log(g_captureLog, "========== CAPTURE END ==========");
+    write_debug("========== CAPTURE END ==========");
+}
+
+// ======================== تزریق IP با آفست ========================
+static void inject_ip_by_offset(JNIEnv *env, jobject obj) {
+    if (env == nullptr || obj == nullptr) {
+        write_debug("❌ env or obj is null");
+        return;
+    }
+    
     if (g_targetIP.empty()) {
         g_targetIP = load_ip();
         if (g_targetIP.empty()) {
-            show_toast(env, obj, "❌ No IP found!", 0);
+            write_debug("❌ No IP found!");
+            write_log(g_ipResultLog, "❌ No IP found!");
             return;
         }
     }
     
     write_debug("🔄 Injecting IP: " + g_targetIP);
+    write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
     
-    // ====== ۱. پیدا کردن کلاس (با ۲ روش) ======
-    jclass menuClass = nullptr;
-    const char* classNames[] = {"GtaMenuControl", "MenuControl"};
-    
-    for (const char* className : classNames) {
-        menuClass = env->FindClass(className);
-        if (menuClass != nullptr) {
-            env->ExceptionClear();
-            write_debug("✅ Found class: " + std::string(className));
-            break;
-        }
-        env->ExceptionClear();
-    }
-    
-    if (menuClass == nullptr) {
-        show_toast(env, obj, "❌ Menu class not found!", 0);
-        write_debug("❌ No menu class found!");
+    uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+    if (baseAddr == 0) {
+        write_debug("❌ libil2cpp.so not loaded!");
+        write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
         return;
     }
     
-    // ====== ۲. پیدا کردن فیلد ipInput (با ۲ اسم) ======
-    jfieldID ipField = env->GetFieldID(menuClass, "ipInput", "LUnityEngine/UI/InputField;");
-    if (ipField == nullptr) {
-        env->ExceptionClear();
-        ipField = env->GetFieldID(menuClass, "ipAddressInput", "LUnityEngine/UI/InputField;");
-        if (ipField == nullptr) {
-            env->ExceptionClear();
-            show_toast(env, obj, "❌ ipInput field not found!", 0);
-            write_debug("❌ ipInput field not found!");
-            return;
-        }
-    }
+    bool injected = false;
+    uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
+    const char* offsetNames[] = {"0xC0", "0xD8", "0x80"};
     
-    // ====== ۳. پیدا کردن instance ======
-    jclass unityObjectClass = env->FindClass("UnityEngine/Object");
-    if (unityObjectClass == nullptr) {
-        env->ExceptionClear();
-        show_toast(env, obj, "❌ UnityEngine.Object not found!", 0);
-        return;
-    }
-    
-    jmethodID findObjectMethod = env->GetStaticMethodID(
-        unityObjectClass,
-        "FindObjectOfType",
-        "(Ljava/lang/Class;)Ljava/lang/Object;"
-    );
-    if (findObjectMethod == nullptr) {
-        env->ExceptionClear();
-        show_toast(env, obj, "❌ FindObjectOfType not found!", 0);
-        return;
-    }
-    
-    jobject menuInstance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, menuClass);
-    if (menuInstance == nullptr) {
-        show_toast(env, obj, "⏳ Menu not loaded yet!", 0);
-        write_debug("⏳ Menu instance is null (not ready)");
-        return;
-    }
-    
-    // ====== ۴. گرفتن ipInput ======
-    jobject inputField = env->GetObjectField(menuInstance, ipField);
-    if (inputField == nullptr) {
-        show_toast(env, obj, "❌ ipInput is null!", 0);
-        write_debug("❌ ipInput object is null");
-        return;
-    }
-    
-    // ====== ۵. ست کردن IP ======
-    jclass inputFieldClass = env->GetObjectClass(inputField);
-    if (inputFieldClass == nullptr) {
-        show_toast(env, obj, "❌ InputField class error!", 0);
-        return;
-    }
-    
-    jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
-    if (setText == nullptr) {
-        env->ExceptionClear();
-        show_toast(env, obj, "❌ set_text not found!", 0);
-        return;
-    }
-    
-    jstring jip = env->NewStringUTF(g_targetIP.c_str());
-    env->CallVoidMethod(inputField, setText, jip);
-    env->DeleteLocalRef(jip);
-    
-    g_menuReady = true;
-    write_debug("✅ IP injected successfully: " + g_targetIP);
-    show_toast(env, obj, "✅ IP Injected: " + g_targetIP, 1);
-}
-
-// ======================== هوک روی GtaMenuControl.Start ========================
-void (*orig_GtaMenuStart)(void *instance);
-void hook_GtaMenuStart(void *instance) {
-    write_debug("🎯 GtaMenuControl.Start() called!");
-    
-    if (instance != nullptr) {
-        g_menuReady = true;
-        write_debug("✅ Menu instance saved: " + std::to_string((uintptr_t)instance));
+    for (int i = 0; i < 3 && !injected; i++) {
+        uintptr_t addr = baseAddr + offsets[i];
+        uintptr_t ptr = 0;
+        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
         
-        // بارگذاری IP
-        g_targetIP = load_ip();
-        if (!g_targetIP.empty()) {
-            write_debug("📌 Loaded IP: " + g_targetIP);
+        if (ptr != 0) {
+            // نوشتن IP
+            KittyMemory::memWrite((void*)ptr, g_targetIP.c_str(), g_targetIP.length());
+            write_debug("✅ IP written at offset " + std::string(offsetNames[i]) + " (0x" + std::to_string(addr) + ")");
+            write_log(g_ipResultLog, "✅ IP written at offset " + std::string(offsetNames[i]) + " (0x" + std::to_string(addr) + ")");
+            injected = true;
         }
     }
     
-    // صدا زدن تابع اصلی
-    if (orig_GtaMenuStart) {
-        orig_GtaMenuStart(instance);
+    if (!injected) {
+        write_debug("❌ All offsets failed!");
+        write_log(g_ipResultLog, "❌ All offsets failed!");
     }
 }
 
@@ -229,7 +215,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         OBFUSCATE("Category_🌐 Network Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
         OBFUSCATE("Button_Inject IP"),             // featNum: 1
-        OBFUSCATE("Button_Status"),                // featNum: 2
+        OBFUSCATE("Button_Show IP"),               // featNum: 2
+        OBFUSCATE("Button_📡 Capture All"),        // featNum: 3
         OBFUSCATE("RichTextView_Status: <font color='yellow'>Ready</font>"),
     };
     int total = sizeof features / sizeof features[0];
@@ -254,24 +241,31 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             if (textStr != nullptr) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
-                show_toast(env, obj, "✅ IP saved: " + g_targetIP, 0);
-                write_debug("IP saved: " + g_targetIP);
+                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
             }
             break;
 
         case 1: // Button_Inject IP
-            write_debug("Inject button pressed");
-            inject_ip_to_game(env, obj);
+            write_log(g_ipResultLog, "🔘 Inject button pressed");
+            inject_ip_by_offset(env, obj);
             break;
 
-        case 2: // Button_Status
+        case 2: // Button_Show IP
             {
-                std::string status = "📊 Status:\n";
-                status += "  Menu ready: " + std::string(g_menuReady ? "✅" : "❌") + "\n";
-                status += "  IP: " + (g_targetIP.empty() ? "(empty)" : g_targetIP);
-                show_toast(env, obj, status, 1);
-                write_debug("Status shown");
+                std::string savedIP = load_ip();
+                if (!savedIP.empty()) {
+                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
+                    show_toast(env, obj, "📌 IP: " + savedIP, 1);
+                } else {
+                    write_log(g_ipResultLog, "❌ No saved IP!");
+                }
             }
+            break;
+
+        case 3: // Button_📡 Capture All
+            write_log(g_captureLog, "🔘 Capture button pressed");
+            capture_everything(env, obj);
+            show_toast(env, obj, "✅ Capture saved to capture_log.txt", 1);
             break;
 
         default:
@@ -296,32 +290,16 @@ void hack_thread() {
     }
     
     if (waitCount >= 30) {
-        write_debug("⏰ Timeout waiting for " + std::string(libName) + " (menu still works)");
+        write_debug("⏰ Timeout waiting for " + std::string(libName));
         return;
     }
     
     write_debug("✅ " + std::string(libName) + " loaded!");
     
-    // بارگذاری IP
     g_targetIP = load_ip();
     if (!g_targetIP.empty()) {
-        write_debug("📌 Loaded IP from file: " + g_targetIP);
+        write_debug("📌 Loaded IP: " + g_targetIP);
     }
-    
-#if defined(__aarch64__)
-    // ====== هوک روی GtaMenuControl.Start ======
-    void *startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF7D060"));
-    if (startAddr != nullptr) {
-        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        if (res == 0) {
-            write_debug("✅ GtaMenuControl.Start() hooked at: 0x" + std::to_string((uintptr_t)startAddr));
-        } else {
-            write_debug("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
-        }
-    } else {
-        write_debug("❌ GtaMenuControl.Start() address not found!");
-    }
-#endif
     
     write_debug("✅ hack_thread finished");
 }
@@ -329,13 +307,28 @@ void hack_thread() {
 // ======================== تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
-    // ایجاد فایل دیباگ
     std::ofstream f(g_debugLog);
     if (f.is_open()) {
         f << "========== MOD LOADED ==========\n";
         f << "Time: " << get_time() << "\n";
         f << "===============================\n\n";
         f.close();
+    }
+    
+    std::ofstream f2(g_ipResultLog);
+    if (f2.is_open()) {
+        f2 << "========== IP RESULT LOG ==========\n";
+        f2 << "Time: " << get_time() << "\n";
+        f2 << "==================================\n\n";
+        f2.close();
+    }
+    
+    std::ofstream f3(g_captureLog);
+    if (f3.is_open()) {
+        f3 << "========== CAPTURE LOG ==========\n";
+        f3 << "Time: " << get_time() << "\n";
+        f3 << "================================\n\n";
+        f3.close();
     }
     
     write_debug("🚀 lib_main called");
