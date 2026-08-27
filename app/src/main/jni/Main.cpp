@@ -17,6 +17,7 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
+#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
@@ -110,7 +111,15 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== دامپ کامل InputField (فقط خوندن) ========================
+// ======================== خوندن امن حافظه ========================
+static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
+    if (addr == 0) return false;
+    if (!KittyMemory::getAddressMap((void*)addr).readable) return false;
+    memcpy(buffer, (void*)addr, len);
+    return true;
+}
+
+// ======================== دامپ کامل InputField (فقط خوندن با چک) ========================
 static void dump_inputfield() {
     try {
         write_log(g_inputfieldDump, "========== INPUTFIELD DUMP ==========");
@@ -125,7 +134,10 @@ static void dump_inputfield() {
         // گرفتن پوینتر ipInput
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t inputFieldPtr = 0;
-        memcpy(&inputFieldPtr, (void*)addr, sizeof(uintptr_t));
+        if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
+            write_log(g_inputfieldDump, "❌ Cannot read ipInput pointer!");
+            return;
+        }
 
         write_log(g_inputfieldDump, "InputField pointer: 0x" + std::to_string(inputFieldPtr));
 
@@ -134,15 +146,16 @@ static void dump_inputfield() {
             return;
         }
 
-        // ====== دامپ 0x200 بایت از InputField ======
-        write_log(g_inputfieldDump, "\n📦 Memory dump (0x0 - 0x200):");
+        // ====== دامپ 0x100 بایت از InputField (نه 0x200 برای جلوگیری از کرش) ======
+        write_log(g_inputfieldDump, "\n📦 Memory dump (0x0 - 0x100):");
         write_log(g_inputfieldDump, "----------------------------------------");
 
-        for (int offset = 0; offset < 0x200; offset += 16) {
+        for (int offset = 0; offset < 0x100; offset += 16) {
             unsigned char data[16];
-            memcpy(data, (void*)(inputFieldPtr + offset), 16);
+            if (!safe_mem_read(inputFieldPtr + offset, data, 16)) {
+                continue;
+            }
 
-            // ساخت خط با stringstream
             std::ostringstream line;
             line << "+0x" << std::setw(3) << std::setfill('0') << std::hex << offset << ": ";
             for (int i = 0; i < 16; i++) {
@@ -154,7 +167,6 @@ static void dump_inputfield() {
                 line << c;
             }
 
-            // فقط خطوطی که داده غیرصفر دارند ذخیره کن
             bool hasData = false;
             for (int i = 0; i < 16; i++) {
                 if (data[i] != 0) { hasData = true; break; }
@@ -169,14 +181,13 @@ static void dump_inputfield() {
         write_log(g_inputfieldDump, "\n🔍 Looking for string pointers:");
         write_log(g_inputfieldDump, "----------------------------------------");
 
-        for (int offset = 0; offset < 0x200; offset += 8) {
+        for (int offset = 0; offset < 0x100; offset += 8) {
             uintptr_t ptr = 0;
-            memcpy(&ptr, (void*)(inputFieldPtr + offset), sizeof(uintptr_t));
+            if (!safe_mem_read(inputFieldPtr + offset, &ptr, sizeof(uintptr_t))) continue;
 
             if (ptr != 0) {
-                // چک کردن اینکه آیا این pointer به یه رشته معتبر اشاره میکنه
                 char buffer[50] = {0};
-                memcpy(buffer, (void*)ptr, 49);
+                if (!safe_mem_read(ptr, buffer, 49)) continue;
 
                 bool isString = true;
                 int strLen = 0;
