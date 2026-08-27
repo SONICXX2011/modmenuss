@@ -41,7 +41,6 @@ static std::vector<std::string> g_rawEntries;
 // ======================== متغیرهای شبکه ========================
 static std::string g_targetIP = "";
 static bool g_ipApplied = false;
-static bool g_connectPressed = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_current_time() {
@@ -137,9 +136,8 @@ static std::string il2cpp_str(void *strObj) {
     return result;
 }
 
-// ======================== توابع Toast با string ========================
+// ======================== تابع Toast با string ========================
 static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int length) {
-    // با NewStringUTF مستقیم می‌فرستیم، چون OBFUSCATE روی متغیر runtime کار نمیکنه
     jstring jmsg = env->NewStringUTF(msg.c_str());
     jclass toastClass = env->FindClass("android/widget/Toast");
     jmethodID makeText = env->GetStaticMethodID(toastClass, "makeText", 
@@ -192,17 +190,19 @@ void hook_RpcSyncObj(void *instance, void *_action, void *_data, void *_player) 
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
+        // بخش دامپ
         OBFUSCATE("Category_ObjData Capture"),
-        OBFUSCATE("Toggle_Enable Capture"),
-        OBFUSCATE("Button_Dump Now"),
-        OBFUSCATE("Button_Clear Log"),
+        OBFUSCATE("Toggle_Enable Capture"),      // featNum: 0
+        OBFUSCATE("Button_Dump Now"),            // featNum: 1
+        OBFUSCATE("Button_Clear Log"),           // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/<br/>lac_objdata.txt<br/>lac_objdata.json"),
 
+        // بخش شبکه
         OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP Address"),
-        OBFUSCATE("Button_Apply IP"),
-        OBFUSCATE("Button_Connect"),
-        OBFUSCATE("Button_Show Saved IP"),
+        OBFUSCATE("InputText_Enter IP Address"), // featNum: 3
+        OBFUSCATE("Button_Apply IP"),            // featNum: 4
+        OBFUSCATE("Button_Connect"),             // featNum: 5
+        OBFUSCATE("Button_Show Saved IP"),       // featNum: 6
         OBFUSCATE("RichTextView_IP Status: <font color='yellow'>Not Set</font>"),
     };
     int total = sizeof features / sizeof features[0];
@@ -223,29 +223,32 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 
     switch (featNum) {
-        case 0:
+        // ===== بخش دامپ (0-2) =====
+        case 0: // Toggle_Enable Capture
             g_captureEnabled = (bool)boolean;
             LOGI("[objData] capture %s", g_captureEnabled ? "ON" : "OFF");
             write_debug("Toggle", g_captureEnabled ? "Capture ON" : "Capture OFF");
             break;
 
-        case 1:
+        case 1: // Button_Dump Now
             flush_json();
             LOGI("[objData] manual flush, count=%d", g_capturedCount);
             write_debug("Button", "Manual dump");
+            show_toast(env, obj, "Dump saved to Download/", ToastLength::LENGTH_SHORT);
             break;
 
-        case 2:
+        case 2: // Button_Clear Log
             g_rawEntries.clear();
             g_capturedCount = 0;
             { std::ofstream f(g_outputPath); f << "cleared at " << get_current_time() << "\n"; }
             { std::ofstream f(g_jsonPath);   f << "{\"count\":0,\"objects\":[]}\n"; }
             LOGI("[objData] cleared");
             write_debug("Button", "Logs cleared");
+            show_toast(env, obj, "Logs cleared", ToastLength::LENGTH_SHORT);
             break;
 
-        // ========== بخش شبکه ==========
-        case 10: // InputText_Enter IP Address
+        // ===== بخش شبکه (3-6) =====
+        case 3: // InputText_Enter IP Address
             if (textStr != nullptr) {
                 g_targetIP = textStr;
                 LOGI("[Network] IP entered: %s", g_targetIP.c_str());
@@ -258,13 +261,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
                     f << "Time: " << get_current_time() << "\n";
                     f.close();
                 }
-
-                // ✅ استفاده از show_toast با string
                 show_toast(env, obj, "IP saved: " + g_targetIP, ToastLength::LENGTH_SHORT);
+            } else {
+                show_toast(env, obj, "No IP entered!", ToastLength::LENGTH_SHORT);
             }
             break;
 
-        case 11: // Button_Apply IP
+        case 4: // Button_Apply IP
             if (!g_targetIP.empty()) {
                 LOGI("[Network] Applying IP: %s", g_targetIP.c_str());
                 log_network(("Applying IP: " + g_targetIP).c_str());
@@ -290,11 +293,9 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 12: // Button_Connect
-            g_connectPressed = true;
+        case 5: // Button_Connect
             LOGI("[Network] Connect button pressed");
             log_network("Connect button pressed");
-
             if (!g_targetIP.empty()) {
                 LOGI("[Network] Attempting connection to: %s", g_targetIP.c_str());
                 std::ofstream f(g_ipResultLog, std::ios::app);
@@ -309,7 +310,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 13: // Button_Show Saved IP
+        case 6: // Button_Show Saved IP
             {
                 std::string savedIP = load_ip_from_file();
                 if (!savedIP.empty()) {
@@ -322,6 +323,8 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         default:
+            LOGI("[Changes] Unknown feature number: %d", featNum);
+            write_debug("WARN", ("Unknown feature: " + std::to_string(featNum)).c_str());
             break;
     }
 
