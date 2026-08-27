@@ -8,6 +8,7 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <iomanip>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -15,20 +16,19 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
-#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
 #define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
-#define OFFSET_M_TEXT    0x180  // InputField.m_Text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
-static std::string g_ipResultLog = g_basePath + "ip_result.txt";
+static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
+static std::string g_inputfieldDump = g_basePath + "inputfield_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -109,54 +109,92 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== تزریق IP ========================
-static void inject_ip_to_game() {
+// ======================== دامپ کامل InputField (فقط خوندن) ========================
+static void dump_inputfield() {
     try {
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
-            }
-        }
+        write_log(g_inputfieldDump, "========== INPUTFIELD DUMP ==========");
+        write_log(g_inputfieldDump, "Time: " + get_time());
 
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
         if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
+            write_log(g_inputfieldDump, "❌ libil2cpp.so not loaded!");
             return;
         }
 
-        // 1. گرفتن پوینتر ipInput (0xC0)
+        // گرفتن پوینتر ipInput
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t inputFieldPtr = 0;
         memcpy(&inputFieldPtr, (void*)addr, sizeof(uintptr_t));
 
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
+        write_log(g_inputfieldDump, "InputField pointer: 0x" + std::to_string(inputFieldPtr));
 
         if (inputFieldPtr == 0) {
-            write_log(g_ipResultLog, "❌ InputField pointer is null!");
+            write_log(g_inputfieldDump, "❌ InputField pointer is null!");
             return;
         }
 
-        // 2. گرفتن m_Text از آفست 0x180
-        uintptr_t textPtrAddr = inputFieldPtr + OFFSET_M_TEXT;
-        uintptr_t textPtr = 0;
-        memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
+        // ====== دامپ 0x200 بایت از InputField ======
+        write_log(g_inputfieldDump, "\n📦 Memory dump (0x0 - 0x200):");
+        write_log(g_inputfieldDump, "----------------------------------------");
 
-        write_log(g_ipResultLog, "   m_Text pointer at 0x" + std::to_string(textPtrAddr) + " → 0x" + std::to_string(textPtr));
+        for (int offset = 0; offset < 0x200; offset += 16) {
+            unsigned char data[16];
+            memcpy(data, (void*)(inputFieldPtr + offset), 16);
 
-        if (textPtr == 0) {
-            write_log(g_ipResultLog, "❌ m_Text pointer is null!");
-            return;
+            std::string hex;
+            char ascii[17] = {0};
+            for (int i = 0; i < 16; i++) {
+                char buf[4];
+                sprintf(buf, "%02X ", data[i]);
+                hex += buf;
+                ascii[i] = (data[i] >= 32 && data[i] <= 126) ? data[i] : '.';
+            }
+
+            // فقط خطوطی که داده غیرصفر دارند
+            bool hasData = false;
+            for (int i = 0; i < 16; i++) {
+                if (data[i] != 0) { hasData = true; break; }
+            }
+
+            if (hasData) {
+                write_log(g_inputfieldDump, "+0x" + std::setw(3) + std::setfill('0') + std::hex + offset + ": " + hex + "  " + ascii);
+            }
         }
 
-        // 3. نوشتن IP
-        KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
-        write_log(g_ipResultLog, "✅ IP written at 0x" + std::to_string(textPtr));
+        // ====== پیدا کردن pointer به string ======
+        write_log(g_inputfieldDump, "\n🔍 Looking for string pointers:");
+        write_log(g_inputfieldDump, "----------------------------------------");
+
+        for (int offset = 0; offset < 0x200; offset += 8) {
+            uintptr_t ptr = 0;
+            memcpy(&ptr, (void*)(inputFieldPtr + offset), sizeof(uintptr_t));
+
+            if (ptr != 0) {
+                // چک کردن اینکه آیا این pointer به یه رشته معتبر اشاره میکنه
+                char buffer[50] = {0};
+                memcpy(buffer, (void*)ptr, 49);
+
+                bool isString = true;
+                int strLen = 0;
+                for (int i = 0; i < 49 && buffer[i] != 0; i++) {
+                    if (buffer[i] < 32 || buffer[i] > 126) {
+                        isString = false;
+                        break;
+                    }
+                    strLen++;
+                }
+
+                if (isString && strLen > 1) {
+                    write_log(g_inputfieldDump, "+0x" + std::setw(3) + std::setfill('0') + std::hex + offset + ": 0x" + std::to_string(ptr) + " → \"" + std::string(buffer) + "\"");
+                }
+            }
+        }
+
+        write_log(g_inputfieldDump, "========== DUMP END ==========");
+        write_log(g_debugLog, "✅ InputField dump saved to inputfield_dump.txt");
 
     } catch (...) {
-        write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
+        write_log(g_crashLog, "⚠️ Exception in dump_inputfield!");
     }
 }
 
@@ -164,10 +202,10 @@ static void inject_ip_to_game() {
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_🌐 Network Tools"),
+        OBFUSCATE("Category_📡 Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Inject IP"),             // featNum: 1
-        OBFUSCATE("Button_Show IP"),               // featNum: 2
+        OBFUSCATE("Button_Show IP"),               // featNum: 1
+        OBFUSCATE("Button_📡 Dump InputField"),    // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -192,22 +230,22 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             if (textStr != nullptr) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
-                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
+                write_log(g_captureLog, "📝 IP entered: " + g_targetIP);
             }
             break;
 
         case 1:
-            write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
-            break;
-
-        case 2:
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
-                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
+                    write_log(g_captureLog, "📌 Show IP: " + savedIP);
                 }
             }
+            break;
+
+        case 2:
+            write_log(g_captureLog, "🔘 Dump InputField button pressed");
+            dump_inputfield();
             break;
 
         default:
