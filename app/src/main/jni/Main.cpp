@@ -15,7 +15,6 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
-#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
@@ -65,6 +64,7 @@ static void save_ip(const std::string& ip) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
+        write_log(g_ipResultLog, "📝 IP saved: " + ip);
     }
 }
 
@@ -108,65 +108,71 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== تزریق IP (با پیدا کردن داینامیک pointer) ========================
-static void inject_ip_to_game() {
-    try {
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
-            }
-        }
+// ======================== تزریق IP با JNI (set_text) ========================
+static void inject_ip_to_game(JNIEnv *env, jobject obj) {
+    if (env == nullptr || obj == nullptr) {
+        write_log(g_ipResultLog, "❌ env or obj is null!");
+        return;
+    }
 
+    if (g_targetIP.empty()) {
+        g_targetIP = load_ip();
+        if (g_targetIP.empty()) {
+            write_log(g_ipResultLog, "❌ No IP found!");
+            return;
+        }
+    }
+
+    write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
+
+    try {
+        // 1. پیدا کردن pointer از آفست 0xC0
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
         if (baseAddr == 0) {
             write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
             return;
         }
 
-        // ====== پیدا کردن pointer ======
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t ptr = 0;
-        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+        uintptr_t inputFieldPtr = 0;
+        memcpy(&inputFieldPtr, (void*)addr, sizeof(uintptr_t));
 
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   Current pointer: 0x" + std::to_string(ptr));
+        write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
 
-        if (ptr == 0) {
-            write_log(g_ipResultLog, "❌ Pointer is null!");
+        if (inputFieldPtr == 0) {
+            write_log(g_ipResultLog, "❌ InputField pointer is null!");
             return;
         }
 
-        // ====== پیدا کردن m_Text داخل InputField ======
-        // آفست‌های احتمالی m_Text در Unity InputField
-        uintptr_t textOffsets[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78};
-        bool injected = false;
-
-        for (int i = 0; i < sizeof(textOffsets)/sizeof(textOffsets[0]) && !injected; i++) {
-            uintptr_t textPtrAddr = ptr + textOffsets[i];
-            uintptr_t textPtr = 0;
-            memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
-
-            if (textPtr != 0) {
-                // چک کردن اینکه textPtr قابل نوشتن هست
-                char buffer[256] = {0};
-                memcpy(buffer, (void*)textPtr, 10);
-                
-                // امتحان نوشتن IP
-                write_log(g_ipResultLog, "   Trying offset +0x" + std::to_string(textOffsets[i]) + " → text pointer: 0x" + std::to_string(textPtr));
-                
-                // استفاده از KittyMemory برای نوشتن
-                if (KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1)) {
-                    write_log(g_ipResultLog, "✅ IP written at offset +0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(textPtr) + ")");
-                    injected = true;
-                }
+        // 2. پیدا کردن کلاس InputField
+        jclass inputFieldClass = env->FindClass("UnityEngine/UI/InputField");
+        if (inputFieldClass == nullptr) {
+            env->ExceptionClear();
+            inputFieldClass = env->FindClass("UnityEngine.UI.InputField");
+            if (inputFieldClass == nullptr) {
+                env->ExceptionClear();
+                write_log(g_ipResultLog, "❌ InputField class not found!");
+                return;
             }
         }
 
-        if (!injected) {
-            write_log(g_ipResultLog, "❌ Could not find writable text field");
+        // 3. پیدا کردن متد set_text
+        jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
+        if (setText == nullptr) {
+            env->ExceptionClear();
+            write_log(g_ipResultLog, "❌ set_text method not found!");
+            return;
         }
+
+        // 4. تبدیل pointer به jobject
+        jobject inputFieldObj = (jobject)inputFieldPtr;
+
+        // 5. ست کردن IP
+        jstring jip = env->NewStringUTF(g_targetIP.c_str());
+        env->CallVoidMethod(inputFieldObj, setText, jip);
+        env->DeleteLocalRef(jip);
+
+        write_log(g_ipResultLog, "✅ IP injected via JNI set_text: " + g_targetIP);
 
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
@@ -211,7 +217,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
         case 1:
             write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
+            inject_ip_to_game(env, obj);
             break;
 
         case 2:
