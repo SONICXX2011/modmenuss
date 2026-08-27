@@ -67,6 +67,27 @@ static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
 
+// ======================== ذخیره و بارگذاری IP ========================
+static void save_ip(const std::string& ip) {
+    std::ofstream f(g_lastIPFile);
+    if (f.is_open()) {
+        f << ip << "\n";
+        f.close();
+        write_debug("IP saved: " + ip);
+    }
+}
+
+static std::string load_ip() {
+    std::ifstream f(g_lastIPFile);
+    if (f.is_open()) {
+        std::string ip;
+        std::getline(f, ip);
+        f.close();
+        return ip;
+    }
+    return "";
+}
+
 // ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
@@ -125,7 +146,6 @@ static void capture_everything() {
             return;
         }
 
-        // آفست‌های IP
         uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
         const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
 
@@ -182,27 +202,6 @@ static void inject_ip_to_game() {
     } catch (...) {
         write_log(g_ipResultLog, "⚠️ Exception in inject_ip_to_game!");
     }
-}
-
-// ======================== ذخیره IP ========================
-static void save_ip(const std::string& ip) {
-    std::ofstream f(g_lastIPFile);
-    if (f.is_open()) {
-        f << ip << "\n";
-        f.close();
-        write_debug("IP saved: " + ip);
-    }
-}
-
-static std::string load_ip() {
-    std::ifstream f(g_lastIPFile);
-    if (f.is_open()) {
-        std::string ip;
-        std::getline(f, ip);
-        f.close();
-        return ip;
-    }
-    return "";
 }
 
 // ======================== منو ========================
