@@ -11,6 +11,7 @@
 #include "Menu/Menu.hpp"
 #include "Menu/Jni.hpp"
 
+// ======================== تعریف لایب با OBFUSCATE (برای هوک) ========================
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== مسیرهای ذخیره‌سازی ========================
@@ -54,9 +55,6 @@ static void save_ip_to_file(const std::string& ip) {
         f << ip << "\n";
         f.close();
         log_network(("IP saved: " + ip).c_str());
-    } else {
-        LOGE("[Network] Failed to save IP to file!");
-        write_debug("ERROR", "Failed to save IP to file");
     }
 }
 
@@ -74,14 +72,12 @@ static std::string load_ip_from_file() {
 // ======================== نمایش Toast با JNI ========================
 static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int length) {
     if (env == nullptr || obj == nullptr) {
-        LOGI("[Network] Cannot show toast: env or obj is null");
         return;
     }
     
     jstring jmsg = env->NewStringUTF(msg.c_str());
     jclass toastClass = env->FindClass("android/widget/Toast");
     if (toastClass == nullptr) {
-        LOGI("[Network] Toast class not found!");
         env->DeleteLocalRef(jmsg);
         return;
     }
@@ -89,14 +85,12 @@ static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int len
     jmethodID makeText = env->GetStaticMethodID(toastClass, "makeText", 
         "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
     if (makeText == nullptr) {
-        LOGI("[Network] makeText method not found!");
         env->DeleteLocalRef(jmsg);
         return;
     }
     
     jobject toast = env->CallStaticObjectMethod(toastClass, makeText, obj, jmsg, length);
     if (toast == nullptr) {
-        LOGI("[Network] Toast object is null!");
         env->DeleteLocalRef(jmsg);
         return;
     }
@@ -113,30 +107,26 @@ static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int len
 // ======================== تزریق IP به بازی (با JNI) ========================
 static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
     if (env == nullptr || obj == nullptr) {
-        LOGI("[Network] Cannot inject: env or obj is null");
         return;
     }
 
-    // 1. پیدا کردن کلاس MenuControl
+    // پیدا کردن کلاس MenuControl
     jclass menuClass = env->FindClass("MenuControl");
     if (menuClass == nullptr) {
-        LOGI("[Network] MenuControl class not found!");
         show_toast(env, obj, "MenuControl not found!", 0);
         return;
     }
 
-    // 2. پیدا کردن فیلد ipInput
+    // پیدا کردن فیلد ipInput
     jfieldID ipField = env->GetFieldID(menuClass, "ipInput", "LUnityEngine/UI/InputField;");
     if (ipField == nullptr) {
-        LOGI("[Network] ipInput field not found!");
         show_toast(env, obj, "ipInput not found!", 0);
         return;
     }
 
-    // 3. پیدا کردن instance MenuControl با FindObjectOfType
+    // پیدا کردن instance MenuControl با FindObjectOfType
     jclass unityObjectClass = env->FindClass("UnityEngine/Object");
     if (unityObjectClass == nullptr) {
-        LOGI("[Network] UnityEngine.Object class not found!");
         show_toast(env, obj, "UnityEngine.Object not found!", 0);
         return;
     }
@@ -147,37 +137,32 @@ static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
         "(Ljava/lang/Class;)Ljava/lang/Object;"
     );
     if (findObjectMethod == nullptr) {
-        LOGI("[Network] FindObjectOfType method not found!");
         show_toast(env, obj, "FindObjectOfType not found!", 0);
         return;
     }
 
     jobject menuInstance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, menuClass);
     if (menuInstance == nullptr) {
-        LOGI("[Network] MenuControl instance not found!");
         show_toast(env, obj, "MenuControl instance not found!", 0);
         return;
     }
 
-    // 4. گرفتن آبجکت ipInput
+    // گرفتن آبجکت ipInput
     jobject inputField = env->GetObjectField(menuInstance, ipField);
     if (inputField == nullptr) {
-        LOGI("[Network] ipInput object is null!");
         show_toast(env, obj, "ipInput is null!", 0);
         return;
     }
 
-    // 5. ست کردن IP با متد set_text
+    // ست کردن IP با متد set_text
     jclass inputFieldClass = env->FindClass("UnityEngine/UI/InputField");
     if (inputFieldClass == nullptr) {
-        LOGI("[Network] InputField class not found!");
         show_toast(env, obj, "InputField class not found!", 0);
         return;
     }
 
     jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
     if (setText == nullptr) {
-        LOGI("[Network] set_text method not found!");
         show_toast(env, obj, "set_text not found!", 0);
         return;
     }
@@ -186,7 +171,6 @@ static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
     env->CallVoidMethod(inputField, setText, jip);
     env->DeleteLocalRef(jip);
 
-    LOGI("[Network] IP injected to game: %s", ip.c_str());
     show_toast(env, obj, "IP Injected: " + ip, 1);
 }
 
@@ -217,31 +201,21 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         textStr = env->GetStringUTFChars(text, nullptr);
     }
 
-    LOGI("[Changes] featNum: %d", featNum);
-    write_debug("Changes", ("featNum: " + std::to_string(featNum)).c_str());
-
     switch (featNum) {
         case 0: // InputText_Enter IP Address
             if (textStr != nullptr) {
                 g_targetIP = textStr;
-                LOGI("[Network] IP entered: %s", g_targetIP.c_str());
                 save_ip_to_file(g_targetIP);
                 show_toast(env, obj, "IP saved: " + g_targetIP, 0);
             } else {
-                LOGI("[Network] No IP entered (text is null)");
                 show_toast(env, obj, "No IP entered!", 0);
             }
             break;
 
         case 1: // Button_Apply IP
-            LOGI("[Network] Apply IP triggered");
             if (g_targetIP.empty()) {
                 g_targetIP = load_ip_from_file();
-                if (!g_targetIP.empty()) {
-                    LOGI("[Network] Loaded IP from file: %s", g_targetIP.c_str());
-                }
             }
-
             if (!g_targetIP.empty()) {
                 inject_ip_to_game(env, obj, g_targetIP);
             } else {
@@ -250,11 +224,9 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 2: // Button_Show Saved IP
-            LOGI("[Network] Show Saved IP triggered");
             {
                 std::string savedIP = load_ip_from_file();
                 if (!savedIP.empty()) {
-                    LOGI("[Network] Saved IP: %s", savedIP.c_str());
                     show_toast(env, obj, "Saved IP: " + savedIP, 1);
                 } else {
                     show_toast(env, obj, "No saved IP found!", 0);
@@ -263,8 +235,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         default:
-            LOGI("[Network] Unknown feature number: %d", featNum);
-            write_debug("WARN", ("Unknown featNum: " + std::to_string(featNum)).c_str());
             break;
     }
 
@@ -275,25 +245,25 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
 // ======================== ترد اصلی (منتظر لود شدن لایب) ========================
 void hack_thread() {
+    // استفاده از متغیر معمولی برای لاگ (نه OBFUSCATE)
+    const char* libName = "libil2cpp.so";
+    
     write_debug("Init", "hack_thread started");
 
     int waitCount = 0;
-    LOGI("[Network] Waiting for %s ...", targetLibName);
+    LOGI("[Network] Waiting for %s ...", libName);
     while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
         sleep(1);
         waitCount++;
-        if (waitCount % 10 == 0) {
-            LOGI("[Network] Still waiting... %d/30", waitCount);
-        }
     }
 
     if (waitCount >= 30) {
-        LOGI("[Network] Timeout: %s not loaded", targetLibName);
+        LOGI("[Network] Timeout: %s not loaded", libName);
         write_debug("ERROR", "Timeout waiting for libil2cpp.so");
         return;
     }
 
-    LOGI("[Network] %s loaded!", targetLibName);
+    LOGI("[Network] %s loaded!", libName);
     write_debug("Init", "libil2cpp.so loaded");
 
     // بارگذاری IP ذخیره‌شده از فایل
@@ -302,8 +272,6 @@ void hack_thread() {
         g_targetIP = savedIP;
         LOGI("[Network] Loaded saved IP: %s", savedIP.c_str());
         write_debug("IP", ("Loaded saved IP: " + savedIP).c_str());
-    } else {
-        LOGI("[Network] No saved IP found");
     }
 
     LOGI("[Network] hack_thread finished");
