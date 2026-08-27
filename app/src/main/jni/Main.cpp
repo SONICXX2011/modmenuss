@@ -9,6 +9,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <unwind.h>
+#include <dlfcn.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -33,12 +35,13 @@ static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_offsetLog = g_basePath + "offset_data.txt";
+static std::string g_memoryDump = g_basePath + "memory_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
 
-// ======================== توابع کمکی (قبل از استفاده) ========================
+// ======================== توابع کمکی ========================
 static std::string get_time() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -60,22 +63,35 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== ایجاد پوشه ========================
 static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
 
-// ======================== هندلر کرش (بدون backtrace) ========================
+// ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
-    if (f.is_open()) {
-        f << "\n========================================\n";
-        f << "💥 CRASH at " << get_time() << "\n";
-        f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
-        f << "Fault address: " << info->si_addr << "\n";
-        f << "========================================\n\n";
-        f.close();
+    if (!f.is_open()) return;
+
+    f << "\n========================================\n";
+    f << "💥 CRASH at " << get_time() << "\n";
+    f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
+    f << "Fault address: " << info->si_addr << "\n";
+
+    #if defined(__aarch64__)
+    ucontext_t *uc = (ucontext_t *)context;
+    struct sigcontext *sc = &uc->uc_mcontext;
+    f << "\n📋 Registers:\n";
+    f << "  pc: 0x" << std::hex << sc->pc << "\n";
+    f << "  lr: 0x" << std::hex << sc->regs[30] << "\n";
+    f << "  sp: 0x" << std::hex << sc->sp << "\n";
+    for (int i = 0; i < 29; i++) {
+        f << "  x" << i << ": 0x" << std::hex << sc->regs[i] << "\n";
     }
+    #endif
+
+    f << "========================================\n\n";
+    f.close();
+
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -95,7 +111,80 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== ذخیره و بارگذاری IP ========================
+// ======================== کپچر کامل ========================
+static void capture_everything() {
+    try {
+        write_log(g_captureLog, "========== CAPTURE START ==========");
+        write_log(g_captureLog, "Time: " + get_time());
+
+        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+        write_log(g_captureLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
+
+        if (baseAddr == 0) {
+            write_log(g_captureLog, "❌ libil2cpp.so not loaded!");
+            return;
+        }
+
+        // آفست‌های IP
+        uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
+        const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
+
+        for (int i = 0; i < 3; i++) {
+            uintptr_t addr = baseAddr + offsets[i];
+            uintptr_t ptr = 0;
+            memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+
+            write_log(g_captureLog, "Offset " + std::string(offsetNames[i]) + " at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
+
+            if (ptr != 0) {
+                char buffer[256] = {0};
+                memcpy(buffer, (void*)ptr, 50);
+                write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
+            }
+        }
+
+        write_log(g_captureLog, "========== CAPTURE END ==========");
+    } catch (...) {
+        write_log(g_crashLog, "⚠️ Exception in capture_everything!");
+    }
+}
+
+// ======================== تزریق IP ========================
+static void inject_ip_to_game() {
+    try {
+        if (g_targetIP.empty()) {
+            g_targetIP = load_ip();
+            if (g_targetIP.empty()) {
+                write_log(g_ipResultLog, "❌ No IP found!");
+                return;
+            }
+        }
+
+        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+        if (baseAddr == 0) {
+            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
+            return;
+        }
+
+        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
+        uintptr_t ptr = 0;
+        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+
+        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
+        write_log(g_ipResultLog, "   pointer: 0x" + std::to_string(ptr));
+
+        if (ptr != 0) {
+            KittyMemory::memWrite((void*)ptr, g_targetIP.c_str(), g_targetIP.length());
+            write_log(g_ipResultLog, "✅ IP written at 0x" + std::to_string(ptr));
+        } else {
+            write_log(g_ipResultLog, "❌ pointer is null!");
+        }
+    } catch (...) {
+        write_log(g_ipResultLog, "⚠️ Exception in inject_ip_to_game!");
+    }
+}
+
+// ======================== ذخیره IP ========================
 static void save_ip(const std::string& ip) {
     std::ofstream f(g_lastIPFile);
     if (f.is_open()) {
@@ -116,98 +205,15 @@ static std::string load_ip() {
     return "";
 }
 
-// ======================== کپچر آفست‌ها (دقیقاً مثل objdata) ========================
-static void capture_offsets(JNIEnv *env, jobject obj) {
-    try {
-        write_debug("========== OFFSET CAPTURE ==========");
-        write_log(g_offsetLog, "========== OFFSET CAPTURE ==========");
-        write_log(g_offsetLog, "Time: " + get_time());
-        
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        write_log(g_offsetLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
-        
-        if (baseAddr == 0) {
-            write_log(g_offsetLog, "❌ libil2cpp.so not loaded!");
-            return;
-        }
-        
-        uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
-        const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
-        
-        for (int i = 0; i < 3; i++) {
-            uintptr_t addr = baseAddr + offsets[i];
-            uintptr_t ptr = 0;
-            memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
-            
-            std::string msg = "Offset " + std::string(offsetNames[i]) + " at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr);
-            write_debug(msg);
-            write_log(g_offsetLog, msg);
-            
-            if (ptr != 0) {
-                char buffer[256] = {0};
-                memcpy(buffer, (void*)ptr, 50);
-                write_log(g_offsetLog, "   Value: \"" + std::string(buffer) + "\"");
-            }
-        }
-        
-        write_log(g_offsetLog, "========== CAPTURE END ==========");
-    } catch (...) {
-        write_log(g_crashLog, "⚠️ Exception in capture_offsets!");
-    }
-}
-
-// ======================== تزریق IP ========================
-static void inject_ip_by_offset(JNIEnv *env, jobject obj) {
-    try {
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
-            }
-        }
-        
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
-            return;
-        }
-        
-        bool injected = false;
-        uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
-        const char* offsetNames[] = {"0xC0", "0xD8", "0x80"};
-        
-        for (int i = 0; i < 3 && !injected; i++) {
-            uintptr_t addr = baseAddr + offsets[i];
-            uintptr_t ptr = 0;
-            memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
-            
-            if (ptr != 0) {
-                KittyMemory::memWrite((void*)ptr, g_targetIP.c_str(), g_targetIP.length());
-                write_log(g_ipResultLog, "✅ IP written at offset " + std::string(offsetNames[i]));
-                injected = true;
-            }
-        }
-        
-        if (!injected) {
-            write_log(g_ipResultLog, "❌ All offsets failed!");
-        }
-    } catch (...) {
-        write_log(g_crashLog, "⚠️ Exception in inject_ip_by_offset!");
-    }
-}
-
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_📡 Offset Tools"),
+        OBFUSCATE("Category_📡 Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
         OBFUSCATE("Button_Inject IP"),             // featNum: 1
         OBFUSCATE("Button_Show IP"),               // featNum: 2
-        OBFUSCATE("Button_📡 Capture Offsets"),    // featNum: 3
+        OBFUSCATE("Button_📡 Capture All"),        // featNum: 3
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -238,7 +244,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
         case 1:
             write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_by_offset(env, obj);
+            inject_ip_to_game();
             break;
 
         case 2:
@@ -251,8 +257,8 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 3:
-            write_log(g_offsetLog, "🔘 Capture button pressed");
-            capture_offsets(env, obj);
+            write_log(g_captureLog, "🔘 Capture button pressed");
+            capture_everything();
             break;
 
         default:
@@ -269,18 +275,18 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 void hack_thread() {
     const char* libName = "libil2cpp.so";
     int waitCount = 0;
-    
+
     write_debug("⏳ Waiting for " + std::string(libName) + "...");
     while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
         sleep(1);
         waitCount++;
     }
-    
+
     if (waitCount >= 30) {
         write_debug("⏰ Timeout");
         return;
     }
-    
+
     write_debug("✅ " + std::string(libName) + " loaded!");
     g_targetIP = load_ip();
     if (!g_targetIP.empty()) {
@@ -293,7 +299,7 @@ __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
-    
+
     std::ofstream f(g_debugLog);
     if (f.is_open()) {
         f << "========== MOD LOADED ==========\n";
@@ -301,7 +307,7 @@ void lib_main() {
         f << "===============================\n\n";
         f.close();
     }
-    
+
     write_debug("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
