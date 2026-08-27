@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <iomanip>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -20,7 +21,7 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+#define OFFSET_IP_INPUT  0xC0
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -141,23 +142,26 @@ static void dump_inputfield() {
             unsigned char data[16];
             memcpy(data, (void*)(inputFieldPtr + offset), 16);
 
-            std::string hex;
-            char ascii[17] = {0};
+            // ساخت خط با stringstream
+            std::ostringstream line;
+            line << "+0x" << std::setw(3) << std::setfill('0') << std::hex << offset << ": ";
             for (int i = 0; i < 16; i++) {
-                char buf[4];
-                sprintf(buf, "%02X ", data[i]);
-                hex += buf;
-                ascii[i] = (data[i] >= 32 && data[i] <= 126) ? data[i] : '.';
+                line << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+            }
+            line << " ";
+            for (int i = 0; i < 16; i++) {
+                char c = (data[i] >= 32 && data[i] <= 126) ? (char)data[i] : '.';
+                line << c;
             }
 
-            // فقط خطوطی که داده غیرصفر دارند
+            // فقط خطوطی که داده غیرصفر دارند ذخیره کن
             bool hasData = false;
             for (int i = 0; i < 16; i++) {
                 if (data[i] != 0) { hasData = true; break; }
             }
 
             if (hasData) {
-                write_log(g_inputfieldDump, "+0x" + std::setw(3) + std::setfill('0') + std::hex + offset + ": " + hex + "  " + ascii);
+                write_log(g_inputfieldDump, line.str());
             }
         }
 
@@ -185,7 +189,9 @@ static void dump_inputfield() {
                 }
 
                 if (isString && strLen > 1) {
-                    write_log(g_inputfieldDump, "+0x" + std::setw(3) + std::setfill('0') + std::hex + offset + ": 0x" + std::to_string(ptr) + " → \"" + std::string(buffer) + "\"");
+                    std::ostringstream line;
+                    line << "+0x" << std::setw(3) << std::setfill('0') << std::hex << offset << ": 0x" << std::to_string(ptr) << " → \"" << std::string(buffer) << "\"";
+                    write_log(g_inputfieldDump, line.str());
                 }
             }
         }
