@@ -19,9 +19,9 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
+// ======================== آفست‌ها (از دامپ) ========================
 #define OFFSET_IP_INPUT  0xC0          // GtaMenuControl.ipInput
-#define OFFSET_SET_TEXT  0x1FF6794     // InputField.set_text
+#define OFFSET_SET_TEXT  0x205DA44     // InputField.set_text (آفست درست!)
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -120,7 +120,12 @@ static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
 }
 
 // ======================== تزریق IP با set_text ========================
-static void inject_ip_to_game() {
+static void inject_ip_to_game(JNIEnv* env, jobject obj) {
+    if (env == nullptr || obj == nullptr) {
+        write_log(g_ipResultLog, "❌ env or obj is null!");
+        return;
+    }
+
     try {
         if (g_targetIP.empty()) {
             g_targetIP = load_ip();
@@ -136,7 +141,7 @@ static void inject_ip_to_game() {
             return;
         }
 
-        // 1. گرفتن پوینتر ipInput از آفست 0xC0
+        // 1. گرفتن پوینتر ipInput
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t inputFieldPtr = 0;
         if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
@@ -152,8 +157,8 @@ static void inject_ip_to_game() {
             return;
         }
 
-        // 2. گرفتن آدرس set_text
-        void* setTextAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1FF6794"));
+        // 2. گرفتن آدرس set_text (آفست درست از دامپ)
+        void* setTextAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x205DA44"));
         if (setTextAddr == nullptr) {
             write_log(g_ipResultLog, "❌ set_text address not found!");
             return;
@@ -162,13 +167,15 @@ static void inject_ip_to_game() {
         write_log(g_ipResultLog, "   set_text address: 0x" + std::to_string((uintptr_t)setTextAddr));
 
         // 3. تعریف تابع set_text
-        typedef void (*SetTextFunc)(void* instance, const char* text);
+        typedef void (*SetTextFunc)(void* instance, void* monoString);
         SetTextFunc setText = (SetTextFunc)setTextAddr;
 
-        // 4. تبدیل IP به monoString (در Unity رشته‌ها monoString هستن)
-        // اما در اینجا برای سادگی از const char* استفاده میکنیم
-        // توجه: در Unity رشته‌ها باید monoString باشن، ولی در عمل اکثراً با const char* کار میکنه
-        setText((void*)inputFieldPtr, g_targetIP.c_str());
+        // 4. تبدیل IP به jstring (monoString)
+        jstring jip = env->NewStringUTF(g_targetIP.c_str());
+
+        // 5. صدا زدن set_text
+        setText((void*)inputFieldPtr, (void*)jip);
+        env->DeleteLocalRef(jip);
 
         write_log(g_ipResultLog, "✅ IP injected via set_text: " + g_targetIP);
 
@@ -215,7 +222,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
         case 1:
             write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
+            inject_ip_to_game(env, obj);
             break;
 
         case 2:
