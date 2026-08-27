@@ -9,7 +9,6 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
-#include <unwind.h>
 #include <dlfcn.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
@@ -23,9 +22,9 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0
-#define OFFSET_IP_INPUT2 0xD8
-#define OFFSET_IP_INPUT3 0x80
+#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+#define OFFSET_IP_INPUT2 0xD8   // MenuControl.ipInput
+#define OFFSET_IP_INPUT3 0x80   // ServerListAccess.ipAddressInput
 
 // ======================== مسیرها (همه توی lac) ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -35,7 +34,6 @@ static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_offsetLog = g_basePath + "offset_data.txt";
-static std::string g_memoryDump = g_basePath + "memory_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -74,6 +72,7 @@ static void save_ip(const std::string& ip) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
+        write_log(g_ipResultLog, "📝 IP saved: " + ip);
     }
 }
 
@@ -88,7 +87,7 @@ static std::string load_ip() {
     return "";
 }
 
-// ======================== کرش‌گیر کامل ========================
+// ======================== کرش‌گیر کامل (SIGSEGV, SIGABRT, ...) ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -98,7 +97,7 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
     f << "Fault address: " << info->si_addr << "\n";
 
-    #if defined(__aarch64__)
+#if defined(__aarch64__)
     ucontext_t *uc = (ucontext_t *)context;
     struct sigcontext *sc = &uc->uc_mcontext;
     f << "\n📋 Registers:\n";
@@ -108,7 +107,7 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     for (int i = 0; i < 29; i++) {
         f << "  x" << i << ": 0x" << std::hex << sc->regs[i] << "\n";
     }
-    #endif
+#endif
 
     f << "========================================\n\n";
     f.close();
@@ -130,9 +129,10 @@ static void install_crash_handler() {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     g_crashHandlerInstalled = true;
+    write_debug("✅ Crash handler installed");
 }
 
-// ======================== کپچر کامل ========================
+// ======================== کپچر کامل (آفست‌ها و مقادیر) ========================
 static void capture_everything() {
     try {
         write_log(g_captureLog, "========== CAPTURE START ==========");
@@ -160,6 +160,8 @@ static void capture_everything() {
                 char buffer[256] = {0};
                 memcpy(buffer, (void*)ptr, 50);
                 write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
+            } else {
+                write_log(g_captureLog, "   Value: (null)");
             }
         }
 
@@ -169,39 +171,94 @@ static void capture_everything() {
     }
 }
 
-// ======================== تزریق IP ========================
-static void inject_ip_to_game() {
-    try {
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
-            }
-        }
+// ======================== تزریق IP با JNI (set_text) ========================
+static void inject_ip_with_jni(JNIEnv *env, jobject obj) {
+    if (env == nullptr || obj == nullptr) {
+        write_log(g_ipResultLog, "❌ env or obj is null!");
+        return;
+    }
 
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
+    if (g_targetIP.empty()) {
+        g_targetIP = load_ip();
+        if (g_targetIP.empty()) {
+            write_log(g_ipResultLog, "❌ No IP found!");
             return;
         }
-
-        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t ptr = 0;
-        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
-
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   pointer: 0x" + std::to_string(ptr));
-
-        if (ptr != 0) {
-            KittyMemory::memWrite((void*)ptr, g_targetIP.c_str(), g_targetIP.length());
-            write_log(g_ipResultLog, "✅ IP written at 0x" + std::to_string(ptr));
-        } else {
-            write_log(g_ipResultLog, "❌ pointer is null!");
-        }
-    } catch (...) {
-        write_log(g_ipResultLog, "⚠️ Exception in inject_ip_to_game!");
     }
+
+    write_log(g_ipResultLog, "🔄 Injecting IP with JNI: " + g_targetIP);
+
+    // 1. پیدا کردن کلاس MenuControl (با دو نام)
+    jclass menuClass = env->FindClass("GtaMenuControl");
+    if (menuClass == nullptr) {
+        env->ExceptionClear();
+        menuClass = env->FindClass("MenuControl");
+        if (menuClass == nullptr) {
+            env->ExceptionClear();
+            write_log(g_ipResultLog, "❌ GtaMenuControl / MenuControl not found!");
+            return;
+        }
+    }
+
+    // 2. پیدا کردن فیلد ipInput
+    jfieldID ipField = env->GetFieldID(menuClass, "ipInput", "LUnityEngine/UI/InputField;");
+    if (ipField == nullptr) {
+        env->ExceptionClear();
+        write_log(g_ipResultLog, "❌ ipInput field not found!");
+        return;
+    }
+
+    // 3. پیدا کردن instance از طریق FindObjectOfType
+    jclass unityObjectClass = env->FindClass("UnityEngine/Object");
+    if (unityObjectClass == nullptr) {
+        env->ExceptionClear();
+        write_log(g_ipResultLog, "❌ UnityEngine.Object not found!");
+        return;
+    }
+
+    jmethodID findObject = env->GetStaticMethodID(
+        unityObjectClass,
+        "FindObjectOfType",
+        "(Ljava/lang/Class;)Ljava/lang/Object;"
+    );
+    if (findObject == nullptr) {
+        env->ExceptionClear();
+        write_log(g_ipResultLog, "❌ FindObjectOfType not found!");
+        return;
+    }
+
+    jobject menuInstance = env->CallStaticObjectMethod(unityObjectClass, findObject, menuClass);
+    if (menuInstance == nullptr) {
+        write_log(g_ipResultLog, "❌ Menu instance not found!");
+        return;
+    }
+
+    // 4. گرفتن ipInput
+    jobject inputField = env->GetObjectField(menuInstance, ipField);
+    if (inputField == nullptr) {
+        write_log(g_ipResultLog, "❌ ipInput is null!");
+        return;
+    }
+
+    // 5. ست کردن IP با set_text
+    jclass inputFieldClass = env->GetObjectClass(inputField);
+    if (inputFieldClass == nullptr) {
+        write_log(g_ipResultLog, "❌ InputField class error!");
+        return;
+    }
+
+    jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
+    if (setText == nullptr) {
+        env->ExceptionClear();
+        write_log(g_ipResultLog, "❌ set_text not found!");
+        return;
+    }
+
+    jstring jip = env->NewStringUTF(g_targetIP.c_str());
+    env->CallVoidMethod(inputField, setText, jip);
+    env->DeleteLocalRef(jip);
+
+    write_log(g_ipResultLog, "✅ IP injected via JNI: " + g_targetIP);
 }
 
 // ======================== منو ========================
@@ -243,7 +300,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
         case 1:
             write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
+            inject_ip_with_jni(env, obj);
             break;
 
         case 2:
@@ -282,14 +339,14 @@ void hack_thread() {
     }
 
     if (waitCount >= 30) {
-        write_debug("⏰ Timeout");
+        write_debug("⏰ Timeout (libil2cpp.so not loaded)");
         return;
     }
 
     write_debug("✅ " + std::string(libName) + " loaded!");
     g_targetIP = load_ip();
     if (!g_targetIP.empty()) {
-        write_debug("📌 Loaded IP: " + g_targetIP);
+        write_debug("📌 Loaded IP from file: " + g_targetIP);
     }
 }
 
