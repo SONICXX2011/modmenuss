@@ -29,7 +29,6 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
-static std::string g_reportLog = g_basePath + "injection_report.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -57,10 +56,6 @@ static void write_log(const std::string& file, const std::string& msg) {
 static void write_debug(const std::string& msg) {
     write_log(g_debugLog, msg);
     LOGI("[Debug] %s", msg.c_str());
-}
-
-static void write_report(const std::string& msg) {
-    write_log(g_reportLog, msg);
 }
 
 static void create_directory() {
@@ -130,98 +125,28 @@ static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
 // ======================== هوک روی GtaMenuControl.Start ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
-    write_report("========== HOOK TRIGGERED ==========");
-    write_report("GtaMenuControl.Start() called at " + get_time());
     write_debug("🎯 GtaMenuControl.Start() called!");
     
     if (instance != nullptr) {
         g_gtaMenuInstance = instance;
         g_gtaMenuReady = true;
-        write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
         write_debug("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
         
         g_targetIP = load_ip();
         if (!g_targetIP.empty()) {
-            write_report("📌 Loaded IP from file: " + g_targetIP);
             write_debug("📌 Loaded IP: " + g_targetIP);
-        } else {
-            write_report("⚠️ No IP found in file");
         }
-    } else {
-        write_report("❌ instance is null!");
     }
-    write_report("====================================\n");
     
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
     }
 }
 
-// ======================== پیدا کردن m_Text درست ========================
-static void find_correct_mtext(JNIEnv* env, jobject obj) {
-    if (!g_gtaMenuReady || g_gtaMenuInstance == nullptr) {
-        write_report("❌ GtaMenuControl not ready yet");
-        return;
-    }
-
-    try {
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_report("❌ libil2cpp.so not loaded!");
-            return;
-        }
-
-        // گرفتن ipInput pointer
-        uintptr_t gtaPtr = (uintptr_t)g_gtaMenuInstance;
-        uintptr_t inputFieldPtr = 0;
-        uintptr_t ipInputAddr = gtaPtr + OFFSET_IP_INPUT;
-        
-        if (!safe_mem_read(ipInputAddr, &inputFieldPtr, sizeof(uintptr_t))) {
-            write_report("❌ Cannot read ipInput!");
-            return;
-        }
-        
-        write_report("✅ ipInput pointer: 0x" + std::to_string(inputFieldPtr));
-        
-        if (inputFieldPtr == 0) {
-            write_report("❌ ipInput is null!");
-            return;
-        }
-
-        // ====== دامپ کامل InputField برای پیدا کردن m_Text ======
-        write_report("\n📦 Dumping InputField object:");
-        for (int offset = 0; offset < 0x200; offset += 8) {
-            uintptr_t ptr = 0;
-            if (!safe_mem_read(inputFieldPtr + offset, &ptr, sizeof(uintptr_t))) continue;
-            
-            if (ptr != 0) {
-                char buffer[50] = {0};
-                if (safe_mem_read(ptr, buffer, 49)) {
-                    bool isString = true;
-                    for (int i = 0; i < 49 && buffer[i] != 0; i++) {
-                        if (buffer[i] < 32 || buffer[i] > 126) {
-                            isString = false;
-                            break;
-                        }
-                    }
-                    if (isString) {
-                        write_report("   +0x" + std::to_string(offset) + ": 0x" + std::to_string(ptr) + " → \"" + std::string(buffer) + "\"");
-                    }
-                }
-            }
-        }
-
-        write_report("========== DUMP COMPLETE ==========\n");
-
-    } catch (...) {
-        write_report("❌ Exception in find_correct_mtext!");
-    }
-}
-
 // ======================== تزریق IP ========================
-static void inject_ip_to_game(JNIEnv* env, jobject obj) {
+static void inject_ip_to_game() {
     if (!g_gtaMenuReady || g_gtaMenuInstance == nullptr) {
-        write_report("❌ GtaMenuControl not ready yet");
+        write_debug("❌ GtaMenuControl not ready yet!");
         return;
     }
 
@@ -229,14 +154,14 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
         if (g_targetIP.empty()) {
             g_targetIP = load_ip();
             if (g_targetIP.empty()) {
-                write_report("❌ No IP found!");
+                write_debug("❌ No IP found!");
                 return;
             }
         }
 
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
         if (baseAddr == 0) {
-            write_report("❌ libil2cpp.so not loaded!");
+            write_debug("❌ libil2cpp.so not loaded!");
             return;
         }
 
@@ -246,19 +171,19 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
         uintptr_t ipInputAddr = gtaPtr + OFFSET_IP_INPUT;
         
         if (!safe_mem_read(ipInputAddr, &inputFieldPtr, sizeof(uintptr_t))) {
-            write_report("❌ Cannot read ipInput!");
+            write_debug("❌ Cannot read ipInput!");
             return;
         }
         
-        write_report("✅ ipInput pointer: 0x" + std::to_string(inputFieldPtr));
+        write_debug("✅ ipInput pointer: 0x" + std::to_string(inputFieldPtr));
         
         if (inputFieldPtr == 0) {
-            write_report("❌ ipInput is null!");
+            write_debug("❌ ipInput is null!");
             return;
         }
 
-        // ====== پیدا کردن m_Text با آفست‌های مختلف ======
-        uintptr_t textOffsets[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100, 0x108, 0x110, 0x118, 0x120, 0x128, 0x130, 0x138, 0x140, 0x148, 0x150, 0x158, 0x160, 0x168, 0x170, 0x178, 0x180, 0x188, 0x190, 0x198, 0x1A0, 0x1A8, 0x1B0, 0x1B8, 0x1C0, 0x1C8, 0x1D0, 0x1D8, 0x1E0, 0x1E8, 0x1F0, 0x1F8, 0x200, 0x208, 0x210, 0x218, 0x220};
+        // ====== امتحان آفست‌های m_Text ======
+        uintptr_t textOffsets[] = {0x180, 0x220, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100, 0x108, 0x110, 0x118, 0x120, 0x128, 0x130, 0x138, 0x140, 0x148, 0x150, 0x158, 0x160, 0x168, 0x170, 0x178};
         bool injected = false;
 
         for (int i = 0; i < sizeof(textOffsets)/sizeof(textOffsets[0]) && !injected; i++) {
@@ -280,19 +205,18 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
 
             // نوشتن IP
             if (KittyMemory::memWrite((void*)mTextPtr, g_targetIP.c_str(), g_targetIP.length() + 1)) {
-                write_report("✅ IP written at offset 0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(mTextPtr) + ")");
+                write_debug("✅ IP written at offset 0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(mTextPtr) + ")");
                 write_log(g_ipResultLog, "✅ IP written at offset 0x" + std::to_string(textOffsets[i]) + ": " + g_targetIP);
                 injected = true;
             }
         }
 
         if (!injected) {
-            write_report("❌ All offsets failed!");
-            find_correct_mtext(env, obj);
+            write_debug("❌ All offsets failed!");
         }
 
     } catch (...) {
-        write_report("❌ Exception in inject_ip_to_game!");
+        write_debug("⚠️ Exception in inject_ip_to_game!");
     }
 }
 
@@ -314,6 +238,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     return ret;
 }
 
+// ======================== تغییرات منو ========================
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
@@ -323,29 +248,36 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 
     switch (featNum) {
-        case 0:
+        case 0: // Input IP
             if (textStr != nullptr) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
-                write_report("📝 IP entered: " + g_targetIP);
+                write_debug("IP entered: " + g_targetIP);
+                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
             }
             break;
 
-        case 1:
-            write_report("🔘 Inject button pressed");
-            inject_ip_to_game(env, obj);
+        case 1: // Button_Inject IP
+            write_debug("🔘 Inject button pressed");
+            write_log(g_ipResultLog, "🔘 Inject button pressed");
+            inject_ip_to_game();
             break;
 
-        case 2:
+        case 2: // Button_Show IP
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
-                    write_report("📌 Show IP: " + savedIP);
+                    write_debug("📌 Show IP: " + savedIP);
+                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
+                } else {
+                    write_debug("❌ No saved IP!");
+                    write_log(g_ipResultLog, "❌ No saved IP!");
                 }
             }
             break;
 
         default:
+            write_debug("Unknown featNum: " + std::to_string(featNum));
             break;
     }
 
@@ -354,28 +286,61 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 }
 
+// ======================== ترد اصلی ========================
 void hack_thread() {
     const char* libName = "libil2cpp.so";
     int waitCount = 0;
 
+    write_debug("⏳ Waiting for " + std::string(libName) + "...");
     while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
         sleep(1);
         waitCount++;
     }
 
-    if (waitCount >= 30) return;
+    if (waitCount >= 30) {
+        write_debug("⏰ Timeout waiting for libil2cpp.so");
+        return;
+    }
+
+    write_debug("✅ " + std::string(libName) + " loaded!");
+    
+    g_targetIP = load_ip();
+    if (!g_targetIP.empty()) {
+        write_debug("📌 Loaded IP from file: " + g_targetIP);
+    }
 
 #if defined(__aarch64__)
+    // ====== هوک روی GtaMenuControl.Start ======
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr) {
-        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_debug("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
+        } else {
+            write_debug("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
+        }
+    } else {
+        write_debug("❌ GtaMenuControl.Start() address not found!");
     }
 #endif
+
+    write_debug("✅ hack_thread finished");
 }
 
+// ======================== تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
+
+    std::ofstream f(g_debugLog);
+    if (f.is_open()) {
+        f << "========== MOD LOADED ==========\n";
+        f << "Time: " << get_time() << "\n";
+        f << "===============================\n\n";
+        f.close();
+    }
+
+    write_debug("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
