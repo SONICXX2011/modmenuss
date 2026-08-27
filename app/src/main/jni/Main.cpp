@@ -19,12 +19,11 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ و توسعه‌دهنده) ========================
+// ======================== آفست‌ها ========================
 #define OFFSET_GTA_START  0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_IP_INPUT   0xC0          // GtaMenuControl.ipInput
-#define OFFSET_SET_TEXT   0x1FF6794     // InputField.set_text (توسعه‌دهنده)
-#define OFFSET_M_TEXT     0x180         // InputField.m_Text (از دامپ)
-#define OFFSET_M_TEXT_ALT 0x220         // TMP_InputField.m_Text (جایگزین)
+#define OFFSET_M_TEXT     0x180         // InputField.m_Text
+#define OFFSET_M_TEXT_ALT 0x220         // TMP_InputField.m_Text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -160,23 +159,14 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
-// ======================== تزریق IP (با m_Text و بدون set_text) ========================
+// ======================== تزریق IP (فقط با KittyMemory، بدون JNI) ========================
 static void inject_ip_to_game(JNIEnv* env, jobject obj) {
     write_report("\n========== INJECTION ATTEMPT ==========");
     write_report("Time: " + get_time());
     write_report("Target IP: " + g_targetIP);
     
-    if (env == nullptr) {
-        write_report("❌ env is null!");
-        return;
-    }
-    if (obj == nullptr) {
-        write_report("❌ obj is null!");
-        return;
-    }
-
     if (!g_gtaMenuReady || g_gtaMenuInstance == nullptr) {
-        write_report("❌ GtaMenuControl not ready yet (instance not captured)");
+        write_report("❌ GtaMenuControl not ready yet");
         write_log(g_ipResultLog, "❌ GtaMenuControl not ready yet!");
         return;
     }
@@ -192,37 +182,35 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
             write_report("📌 IP loaded from file: " + g_targetIP);
         }
 
-        // ====== 1. گرفتن ipInput از instance GtaMenuControl ======
-        write_report("Step 1: Getting ipInput from GtaMenuControl instance");
-        jclass gtaMenuClass = env->GetObjectClass((jobject)g_gtaMenuInstance);
-        if (gtaMenuClass == nullptr) {
-            env->ExceptionClear();
-            write_report("❌ Failed to get GtaMenuControl class");
-            write_log(g_ipResultLog, "❌ GtaMenuControl class not found!");
+        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+        if (baseAddr == 0) {
+            write_report("❌ libil2cpp.so not loaded!");
+            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
             return;
         }
-        write_report("✅ GtaMenuControl class obtained");
 
-        jfieldID ipField = env->GetFieldID(gtaMenuClass, "ipInput", "LUnityEngine/UI/InputField;");
-        if (ipField == nullptr) {
-            env->ExceptionClear();
-            write_report("❌ ipInput field not found in GtaMenuControl");
-            write_log(g_ipResultLog, "❌ ipInput field not found!");
+        // ====== 1. گرفتن ipInput از instance (با آفست) ======
+        write_report("Step 1: Reading ipInput pointer from GtaMenuControl instance");
+        uintptr_t gtaPtr = (uintptr_t)g_gtaMenuInstance;
+        uintptr_t inputFieldPtr = 0;
+        uintptr_t ipInputAddr = gtaPtr + OFFSET_IP_INPUT;
+        
+        if (!safe_mem_read(ipInputAddr, &inputFieldPtr, sizeof(uintptr_t))) {
+            write_report("❌ Cannot read ipInput at 0x" + std::to_string(ipInputAddr));
+            write_log(g_ipResultLog, "❌ Cannot read ipInput!");
             return;
         }
-        write_report("✅ ipInput field ID obtained");
-
-        jobject inputField = env->GetObjectField((jobject)g_gtaMenuInstance, ipField);
-        if (inputField == nullptr) {
-            write_report("❌ ipInput object is null (field not initialized?)");
+        
+        write_report("✅ ipInput pointer: 0x" + std::to_string(inputFieldPtr));
+        
+        if (inputFieldPtr == 0) {
+            write_report("❌ ipInput is null!");
             write_log(g_ipResultLog, "❌ ipInput is null!");
             return;
         }
-        uintptr_t inputFieldPtr = (uintptr_t)inputField;
-        write_report("✅ ipInput object obtained: 0x" + std::to_string(inputFieldPtr));
 
-        // ====== 2. روش m_Text: نوشتن مستقیم ======
-        write_report("\n--- Method: m_Text direct memory write ---");
+        // ====== 2. نوشتن IP با m_Text offsets ======
+        write_report("\n--- Trying m_Text offsets ---");
         uintptr_t textOffsets[] = {OFFSET_M_TEXT, OFFSET_M_TEXT_ALT, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100, 0x108, 0x110, 0x118, 0x120, 0x128, 0x130, 0x138, 0x140, 0x148, 0x150, 0x158, 0x160, 0x168, 0x170, 0x178};
         bool injected = false;
 
@@ -245,16 +233,16 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
             if (!map.writeable) {
                 // تلاش برای تغییر protection
                 if (KittyMemory::memProtect((void*)mTextPtr, g_targetIP.length() + 1, PROT_READ | PROT_WRITE) != 0) {
-                    write_report("   Offset 0x" + std::to_string(textOffsets[i]) + ": cannot make writable (protection: " + std::to_string(map.protection) + ")");
+                    write_report("   Offset 0x" + std::to_string(textOffsets[i]) + ": cannot make writable");
                     continue;
                 }
-                write_report("   Offset 0x" + std::to_string(textOffsets[i]) + ": protection changed to RW");
+                write_report("   Offset 0x" + std::to_string(textOffsets[i]) + ": protection changed");
             }
 
             // نوشتن IP
             if (KittyMemory::memWrite((void*)mTextPtr, g_targetIP.c_str(), g_targetIP.length() + 1)) {
-                write_report("✅ IP successfully written to m_Text at offset 0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(mTextPtr) + ")");
-                write_log(g_ipResultLog, "✅ IP written via m_Text at offset 0x" + std::to_string(textOffsets[i]) + ": " + g_targetIP);
+                write_report("✅ IP successfully written at offset 0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(mTextPtr) + ")");
+                write_log(g_ipResultLog, "✅ IP written at offset 0x" + std::to_string(textOffsets[i]) + ": " + g_targetIP);
                 injected = true;
             } else {
                 write_report("   Offset 0x" + std::to_string(textOffsets[i]) + ": write failed");
@@ -270,10 +258,10 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
 
     } catch (const std::exception& e) {
         write_report("❌ Exception: " + std::string(e.what()));
-        write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game: " + std::string(e.what()));
+        write_log(g_crashLog, "⚠️ Exception: " + std::string(e.what()));
     } catch (...) {
         write_report("❌ Unknown exception caught");
-        write_log(g_crashLog, "⚠️ Unknown exception in inject_ip_to_game!");
+        write_log(g_crashLog, "⚠️ Unknown exception!");
     }
 }
 
