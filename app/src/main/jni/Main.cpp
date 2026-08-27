@@ -21,16 +21,13 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0
-
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
-static std::string g_dumpLog = g_basePath + "object_dump.txt";
+static std::string g_scanLog = g_basePath + "scan_result.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -114,77 +111,78 @@ static void install_crash_handler() {
 // ======================== خوندن امن حافظه ========================
 static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
     if (addr == 0) return false;
+    
+    // چک با KittyMemory
     auto map = KittyMemory::getAddressMap((void*)addr);
     if (!map.readable) return false;
+    
+    // چک محدوده
     if (addr < map.startAddress || addr + len > map.endAddress) return false;
+    
+    // خوندن
     memcpy(buffer, (void*)addr, len);
     return true;
 }
 
-// ======================== دامپ کامل آبجکت ========================
-static void dump_object(uintptr_t objPtr) {
-    if (objPtr == 0) return;
-    
-    write_log(g_dumpLog, "\n========== OBJECT DUMP ==========");
-    write_log(g_dumpLog, "Object pointer: 0x" + std::to_string(objPtr));
-    write_log(g_dumpLog, "Time: " + get_time());
-    write_log(g_dumpLog, "----------------------------------------");
-    
-    // دامپ 0x200 بایت
-    for (int offset = 0; offset < 0x200; offset += 16) {
-        unsigned char data[16];
-        if (!safe_mem_read(objPtr + offset, data, 16)) {
-            continue;
+// ======================== اسکن امن رشته IP ========================
+static void scan_for_ip_string() {
+    try {
+        write_log(g_scanLog, "========== SCAN FOR IP STRING ==========");
+        write_log(g_scanLog, "Time: " + get_time());
+
+        // IP رو از فایل بخون
+        std::string searchStr = load_ip();
+        if (searchStr.empty()) {
+            write_log(g_scanLog, "❌ No IP to search for! Enter IP first.");
+            return;
         }
+
+        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+        if (baseAddr == 0) {
+            write_log(g_scanLog, "❌ libil2cpp.so not loaded!");
+            return;
+        }
+
+        write_log(g_scanLog, "🔍 Searching for: \"" + searchStr + "\"");
+        write_log(g_scanLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
+        write_log(g_scanLog, "----------------------------------------");
+
+        int foundCount = 0;
+        // محدوده 1 مگابایت (برای سرعت و جلوگیری از کرش)
+        uintptr_t startAddr = baseAddr;
+        uintptr_t endAddr = baseAddr + 0x100000; // 1MB
         
-        std::ostringstream line;
-        line << "+0x" << std::setw(3) << std::setfill('0') << std::hex << offset << ": ";
-        for (int i = 0; i < 16; i++) {
-            line << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
-        }
-        line << " ";
-        for (int i = 0; i < 16; i++) {
-            char c = (data[i] >= 32 && data[i] <= 126) ? (char)data[i] : '.';
-            line << c;
-        }
-        
-        bool hasData = false;
-        for (int i = 0; i < 16; i++) {
-            if (data[i] != 0) { hasData = true; break; }
-        }
-        
-        if (hasData) {
-            write_log(g_dumpLog, line.str());
-        }
-    }
-    
-    // پیدا کردن string pointer ها
-    write_log(g_dumpLog, "\n🔍 String pointers found:");
-    for (int offset = 0; offset < 0x200; offset += 8) {
-        uintptr_t ptr = 0;
-        if (!safe_mem_read(objPtr + offset, &ptr, sizeof(uintptr_t))) continue;
-        
-        if (ptr != 0) {
+        write_log(g_scanLog, "Scanning range: 0x" + std::to_string(startAddr) + " - 0x" + std::to_string(endAddr));
+
+        for (uintptr_t addr = startAddr; addr < endAddr; addr += 4) {
             char buffer[50] = {0};
-            if (safe_mem_read(ptr, buffer, 49)) {
-                bool isString = true;
-                for (int i = 0; i < 49 && buffer[i] != 0; i++) {
-                    if (buffer[i] < 32 || buffer[i] > 126) {
-                        isString = false;
-                        break;
+            if (!safe_mem_read(addr, buffer, searchStr.length())) continue;
+            
+            if (strncmp(buffer, searchStr.c_str(), searchStr.length()) == 0) {
+                foundCount++;
+                write_log(g_scanLog, "✅ Found \"" + searchStr + "\" at 0x" + std::to_string(addr));
+                
+                // پیدا کردن pointer به این آدرس
+                for (uintptr_t ptrAddr = startAddr; ptrAddr < endAddr; ptrAddr += 4) {
+                    uintptr_t ptr = 0;
+                    if (!safe_mem_read(ptrAddr, &ptr, sizeof(uintptr_t))) continue;
+                    if (ptr == addr) {
+                        write_log(g_scanLog, "   → Pointer at 0x" + std::to_string(ptrAddr) + " (offset: 0x" + std::to_string(ptrAddr - baseAddr) + ")");
                     }
-                }
-                if (isString) {
-                    write_log(g_dumpLog, "+0x" + std::to_string(offset) + " → 0x" + std::to_string(ptr) + " → \"" + std::string(buffer) + "\"");
                 }
             }
         }
+
+        write_log(g_scanLog, "Found " + std::to_string(foundCount) + " matches.");
+        write_log(g_scanLog, "========== SCAN END ==========");
+        write_log(g_debugLog, "✅ IP string scan completed. Check scan_result.txt");
+
+    } catch (...) {
+        write_log(g_crashLog, "⚠️ Exception in scan_for_ip_string!");
     }
-    
-    write_log(g_dumpLog, "========== DUMP END ==========");
 }
 
-// ======================== تزریق IP با دامپ ========================
+// ======================== تزریق IP ========================
 static void inject_ip_to_game() {
     try {
         if (g_targetIP.empty()) {
@@ -195,59 +193,8 @@ static void inject_ip_to_game() {
             }
         }
 
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
-            return;
-        }
-
-        // گرفتن پوینتر ipInput
-        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t inputFieldPtr = 0;
-        if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
-            write_log(g_ipResultLog, "❌ Cannot read ipInput pointer!");
-            return;
-        }
-
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
-
-        if (inputFieldPtr == 0) {
-            write_log(g_ipResultLog, "❌ InputField pointer is null!");
-            return;
-        }
-
-        // ====== دامپ کامل آبجکت ======
-        dump_object(inputFieldPtr);
-        write_log(g_ipResultLog, "📦 Object dumped to object_dump.txt");
-
-        // ====== اسکن آفست‌های احتمالی ======
-        uintptr_t textOffsets[] = {
-            0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50,
-            0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88,
-            0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
-            0x180, 0x108, 0x110, 0x148, 0x150, 0x158
-        };
-        bool injected = false;
-
-        for (int i = 0; i < sizeof(textOffsets)/sizeof(textOffsets[0]) && !injected; i++) {
-            uintptr_t textPtrAddr = inputFieldPtr + textOffsets[i];
-            uintptr_t textPtr = 0;
-            if (!safe_mem_read(textPtrAddr, &textPtr, sizeof(uintptr_t))) continue;
-
-            if (textPtr != 0) {
-                auto map = KittyMemory::getAddressMap((void*)textPtr);
-                if (map.writeable) {
-                    KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
-                    write_log(g_ipResultLog, "✅ IP written at offset +0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(textPtr) + ")");
-                    injected = true;
-                }
-            }
-        }
-
-        if (!injected) {
-            write_log(g_ipResultLog, "❌ Could not find writable m_Text field!");
-        }
+        // فقط لاگ کن
+        write_log(g_ipResultLog, "🔄 IP ready: " + g_targetIP);
 
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
@@ -260,8 +207,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Inject IP"),             // featNum: 1
-        OBFUSCATE("Button_Show IP"),               // featNum: 2
+        OBFUSCATE("Button_Show IP"),               // featNum: 1
+        OBFUSCATE("Button_🔍 Scan IP String"),     // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -291,17 +238,17 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 1:
-            write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
-            break;
-
-        case 2:
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
                     write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
                 }
             }
+            break;
+
+        case 2:
+            write_log(g_ipResultLog, "🔍 Scan IP String button pressed");
+            scan_for_ip_string();
             break;
 
         default:
@@ -332,7 +279,7 @@ void hack_thread() {
     write_debug("✅ " + std::string(libName) + " loaded!");
     g_targetIP = load_ip();
     if (!g_targetIP.empty()) {
-        write_debug("📌 Loaded IP: " + g_targetIP);
+        write_debug("📌 Loaded IP from file: " + g_targetIP);
     }
 }
 
