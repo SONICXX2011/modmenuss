@@ -8,8 +8,6 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
-#include <iomanip>
-#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -21,13 +19,16 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
+// ======================== آفست‌ها ========================
+#define OFFSET_IP_INPUT  0xC0          // GtaMenuControl.ipInput
+#define OFFSET_SET_TEXT  0x1FF6794     // InputField.set_text
+
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
-static std::string g_scanLog = g_basePath + "scan_result.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -111,78 +112,14 @@ static void install_crash_handler() {
 // ======================== خوندن امن حافظه ========================
 static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
     if (addr == 0) return false;
-    
-    // چک با KittyMemory
     auto map = KittyMemory::getAddressMap((void*)addr);
     if (!map.readable) return false;
-    
-    // چک محدوده
     if (addr < map.startAddress || addr + len > map.endAddress) return false;
-    
-    // خوندن
     memcpy(buffer, (void*)addr, len);
     return true;
 }
 
-// ======================== اسکن امن رشته IP ========================
-static void scan_for_ip_string() {
-    try {
-        write_log(g_scanLog, "========== SCAN FOR IP STRING ==========");
-        write_log(g_scanLog, "Time: " + get_time());
-
-        // IP رو از فایل بخون
-        std::string searchStr = load_ip();
-        if (searchStr.empty()) {
-            write_log(g_scanLog, "❌ No IP to search for! Enter IP first.");
-            return;
-        }
-
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_scanLog, "❌ libil2cpp.so not loaded!");
-            return;
-        }
-
-        write_log(g_scanLog, "🔍 Searching for: \"" + searchStr + "\"");
-        write_log(g_scanLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
-        write_log(g_scanLog, "----------------------------------------");
-
-        int foundCount = 0;
-        // محدوده 1 مگابایت (برای سرعت و جلوگیری از کرش)
-        uintptr_t startAddr = baseAddr;
-        uintptr_t endAddr = baseAddr + 0x100000; // 1MB
-        
-        write_log(g_scanLog, "Scanning range: 0x" + std::to_string(startAddr) + " - 0x" + std::to_string(endAddr));
-
-        for (uintptr_t addr = startAddr; addr < endAddr; addr += 4) {
-            char buffer[50] = {0};
-            if (!safe_mem_read(addr, buffer, searchStr.length())) continue;
-            
-            if (strncmp(buffer, searchStr.c_str(), searchStr.length()) == 0) {
-                foundCount++;
-                write_log(g_scanLog, "✅ Found \"" + searchStr + "\" at 0x" + std::to_string(addr));
-                
-                // پیدا کردن pointer به این آدرس
-                for (uintptr_t ptrAddr = startAddr; ptrAddr < endAddr; ptrAddr += 4) {
-                    uintptr_t ptr = 0;
-                    if (!safe_mem_read(ptrAddr, &ptr, sizeof(uintptr_t))) continue;
-                    if (ptr == addr) {
-                        write_log(g_scanLog, "   → Pointer at 0x" + std::to_string(ptrAddr) + " (offset: 0x" + std::to_string(ptrAddr - baseAddr) + ")");
-                    }
-                }
-            }
-        }
-
-        write_log(g_scanLog, "Found " + std::to_string(foundCount) + " matches.");
-        write_log(g_scanLog, "========== SCAN END ==========");
-        write_log(g_debugLog, "✅ IP string scan completed. Check scan_result.txt");
-
-    } catch (...) {
-        write_log(g_crashLog, "⚠️ Exception in scan_for_ip_string!");
-    }
-}
-
-// ======================== تزریق IP ========================
+// ======================== تزریق IP با set_text ========================
 static void inject_ip_to_game() {
     try {
         if (g_targetIP.empty()) {
@@ -193,8 +130,47 @@ static void inject_ip_to_game() {
             }
         }
 
-        // فقط لاگ کن
-        write_log(g_ipResultLog, "🔄 IP ready: " + g_targetIP);
+        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
+        if (baseAddr == 0) {
+            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
+            return;
+        }
+
+        // 1. گرفتن پوینتر ipInput از آفست 0xC0
+        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
+        uintptr_t inputFieldPtr = 0;
+        if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
+            write_log(g_ipResultLog, "❌ Cannot read ipInput pointer!");
+            return;
+        }
+
+        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
+        write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
+
+        if (inputFieldPtr == 0) {
+            write_log(g_ipResultLog, "❌ InputField pointer is null!");
+            return;
+        }
+
+        // 2. گرفتن آدرس set_text
+        void* setTextAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1FF6794"));
+        if (setTextAddr == nullptr) {
+            write_log(g_ipResultLog, "❌ set_text address not found!");
+            return;
+        }
+
+        write_log(g_ipResultLog, "   set_text address: 0x" + std::to_string((uintptr_t)setTextAddr));
+
+        // 3. تعریف تابع set_text
+        typedef void (*SetTextFunc)(void* instance, const char* text);
+        SetTextFunc setText = (SetTextFunc)setTextAddr;
+
+        // 4. تبدیل IP به monoString (در Unity رشته‌ها monoString هستن)
+        // اما در اینجا برای سادگی از const char* استفاده میکنیم
+        // توجه: در Unity رشته‌ها باید monoString باشن، ولی در عمل اکثراً با const char* کار میکنه
+        setText((void*)inputFieldPtr, g_targetIP.c_str());
+
+        write_log(g_ipResultLog, "✅ IP injected via set_text: " + g_targetIP);
 
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
@@ -207,8 +183,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Show IP"),               // featNum: 1
-        OBFUSCATE("Button_🔍 Scan IP String"),     // featNum: 2
+        OBFUSCATE("Button_Inject IP"),             // featNum: 1
+        OBFUSCATE("Button_Show IP"),               // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -238,17 +214,17 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 1:
+            write_log(g_ipResultLog, "🔘 Inject button pressed");
+            inject_ip_to_game();
+            break;
+
+        case 2:
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
                     write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
                 }
             }
-            break;
-
-        case 2:
-            write_log(g_ipResultLog, "🔍 Scan IP String button pressed");
-            scan_for_ip_string();
             break;
 
         default:
