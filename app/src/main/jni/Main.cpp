@@ -15,14 +15,13 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
-#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+#define OFFSET_IP_INPUT  0xC0
 
-// ======================== مسیرها (همه توی lac) ========================
+// ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
@@ -60,7 +59,6 @@ static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
 
-// ======================== ذخیره و بارگذاری IP ========================
 static void save_ip(const std::string& ip) {
     std::ofstream f(g_lastIPFile);
     if (f.is_open()) {
@@ -123,7 +121,7 @@ static void install_crash_handler() {
     write_debug("✅ Crash handler installed");
 }
 
-// ======================== کپچر (فقط لاگ آفست) ========================
+// ======================== کپچر کامل ========================
 static void capture_everything() {
     try {
         write_log(g_captureLog, "========== CAPTURE START ==========");
@@ -147,72 +145,25 @@ static void capture_everything() {
             char buffer[256] = {0};
             memcpy(buffer, (void*)ptr, 50);
             write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
+            
+            // ====== دامپ کامل InputField object ======
+            write_log(g_captureLog, "📦 InputField object dump:");
+            for (int offset = 0; offset < 0x100; offset += 16) {
+                unsigned char data[16];
+                memcpy(data, (void*)(ptr + offset), 16);
+                std::string hex;
+                for (int j = 0; j < 16; j++) {
+                    char buf[4];
+                    sprintf(buf, "%02X ", data[j]);
+                    hex += buf;
+                }
+                write_log(g_captureLog, "  +0x" + std::to_string(offset) + ": " + hex);
+            }
         }
 
         write_log(g_captureLog, "========== CAPTURE END ==========");
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in capture_everything!");
-    }
-}
-
-// ======================== تزریق IP (نوشتن مستقیم در حافظه) ========================
-static void inject_ip_to_game() {
-    try {
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
-            }
-        }
-
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
-            return;
-        }
-
-        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t ptr = 0;
-        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
-
-        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   InputField object at: 0x" + std::to_string(ptr));
-
-        if (ptr == 0) {
-            write_log(g_ipResultLog, "❌ InputField pointer is null!");
-            return;
-        }
-
-        // ========== امتحان آفست‌های احتمالی برای m_Text ==========
-        uintptr_t textOffsets[] = {0x18, 0x20, 0x28, 0x30, 0x38};
-        bool injected = false;
-
-        for (int i = 0; i < 5 && !injected; i++) {
-            uintptr_t textPtrAddr = ptr + textOffsets[i];
-            uintptr_t textPtr = 0;
-            memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
-
-            if (textPtr != 0) {
-                // چک کن که textPtr یک آدرس معتبر است
-                if (KittyMemory::getAddressMap((void*)textPtr).readable) {
-                    // نوشتن IP به عنوان string در حافظه
-                    // توجه: این کار ممکن است باعث کرش شود اگر string immutable باشد
-                    // ولی امتحان میکنیم
-                    KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
-                    write_log(g_ipResultLog, "✅ IP written to text field at offset 0x" + std::to_string(textOffsets[i]));
-                    injected = true;
-                }
-            }
-        }
-
-        if (!injected) {
-            write_log(g_ipResultLog, "❌ Could not find text field in InputField object");
-        }
-
-    } catch (...) {
-        write_log(g_ipResultLog, "⚠️ Exception in inject_ip_to_game!");
-        write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
     }
 }
 
@@ -222,9 +173,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_📡 Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Inject IP"),             // featNum: 1
-        OBFUSCATE("Button_Show IP"),               // featNum: 2
-        OBFUSCATE("Button_📡 Capture"),            // featNum: 3
+        OBFUSCATE("Button_Show IP"),               // featNum: 1
+        OBFUSCATE("Button_📡 Capture All"),        // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -254,11 +204,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 1:
-            write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game();
-            break;
-
-        case 2:
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
@@ -267,7 +212,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 3:
+        case 2:
             write_log(g_captureLog, "🔘 Capture button pressed");
             capture_everything();
             break;
@@ -294,7 +239,7 @@ void hack_thread() {
     }
 
     if (waitCount >= 30) {
-        write_debug("⏰ Timeout (libil2cpp.so not loaded)");
+        write_debug("⏰ Timeout");
         return;
     }
 
