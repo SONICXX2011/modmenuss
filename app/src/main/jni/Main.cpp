@@ -19,14 +19,13 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (فقط خام، مثل objdata) ========================
-#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+// ======================== آفست‌ها ========================
+#define OFFSET_IP_INPUT  0xC0
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
-static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 
@@ -88,17 +87,6 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     f << "💥 CRASH at " << get_time() << "\n";
     f << "Signal: " << sig << " (" << strsignal(sig) << ")\n";
     f << "Fault address: " << info->si_addr << "\n";
-#if defined(__aarch64__)
-    ucontext_t *uc = (ucontext_t *)context;
-    struct sigcontext *sc = &uc->uc_mcontext;
-    f << "\n📋 Registers:\n";
-    f << "  pc: 0x" << std::hex << sc->pc << "\n";
-    f << "  lr: 0x" << std::hex << sc->regs[30] << "\n";
-    f << "  sp: 0x" << std::hex << sc->sp << "\n";
-    for (int i = 0; i < 29; i++) {
-        f << "  x" << i << ": 0x" << std::hex << sc->regs[i] << "\n";
-    }
-#endif
     f << "========================================\n\n";
     f.close();
     signal(sig, SIG_DFL);
@@ -118,72 +106,81 @@ static void install_crash_handler() {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     g_crashHandlerInstalled = true;
-    write_debug("✅ Crash handler installed");
 }
 
-// ======================== هوک روی تابع Write یا set_text (با آفست) ========================
-// این هوک مثل objdata هست، فقط روی تابع set_text
-void (*orig_SetText)(void *instance, void *text);
-void hook_SetText(void *instance, void *text) {
-    // اینجا می‌تونیم IP رو تغییر بدیم
-    // ولی فعلاً فقط لاگ می‌گیریم
-    write_debug("📌 SetText called with instance: " + std::to_string((uintptr_t)instance) + ", text: " + std::to_string((uintptr_t)text));
-    
-    if (orig_SetText) {
-        orig_SetText(instance, text);
-    }
-}
-
-// ======================== کپچر (فقط آفست، مثل objdata) ========================
-static void capture_everything() {
+// ======================== تزریق IP (با پیدا کردن داینامیک pointer) ========================
+static void inject_ip_to_game() {
     try {
-        write_log(g_captureLog, "========== CAPTURE START ==========");
-        write_log(g_captureLog, "Time: " + get_time());
+        if (g_targetIP.empty()) {
+            g_targetIP = load_ip();
+            if (g_targetIP.empty()) {
+                write_log(g_ipResultLog, "❌ No IP found!");
+                return;
+            }
+        }
 
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        write_log(g_captureLog, "libil2cpp.so base: 0x" + std::to_string(baseAddr));
-
         if (baseAddr == 0) {
-            write_log(g_captureLog, "❌ libil2cpp.so not loaded!");
+            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
             return;
         }
 
-        // فقط آفست 0xC0 رو بخون
+        // ====== پیدا کردن pointer ======
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t ptr = 0;
         memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
 
-        write_log(g_captureLog, "Offset 0xC0 at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
+        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
+        write_log(g_ipResultLog, "   Current pointer: 0x" + std::to_string(ptr));
 
-        if (ptr != 0) {
-            // آفست‌های احتمالی m_Text در InputField (از دامپ Unity)
-            uintptr_t textOffsets[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60};
-            for (int i = 0; i < 10; i++) {
-                uintptr_t textPtrAddr = ptr + textOffsets[i];
-                uintptr_t textPtr = 0;
-                memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
-                if (textPtr != 0) {
-                    char buffer[256] = {0};
-                    memcpy(buffer, (void*)textPtr, 50);
-                    write_log(g_captureLog, "  Offset +0x" + std::to_string(textOffsets[i]) + " → text pointer: 0x" + std::to_string(textPtr) + " → \"" + std::string(buffer) + "\"");
+        if (ptr == 0) {
+            write_log(g_ipResultLog, "❌ Pointer is null!");
+            return;
+        }
+
+        // ====== پیدا کردن m_Text داخل InputField ======
+        // آفست‌های احتمالی m_Text در Unity InputField
+        uintptr_t textOffsets[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78};
+        bool injected = false;
+
+        for (int i = 0; i < sizeof(textOffsets)/sizeof(textOffsets[0]) && !injected; i++) {
+            uintptr_t textPtrAddr = ptr + textOffsets[i];
+            uintptr_t textPtr = 0;
+            memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
+
+            if (textPtr != 0) {
+                // چک کردن اینکه textPtr قابل نوشتن هست
+                char buffer[256] = {0};
+                memcpy(buffer, (void*)textPtr, 10);
+                
+                // امتحان نوشتن IP
+                write_log(g_ipResultLog, "   Trying offset +0x" + std::to_string(textOffsets[i]) + " → text pointer: 0x" + std::to_string(textPtr));
+                
+                // استفاده از KittyMemory برای نوشتن
+                if (KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1)) {
+                    write_log(g_ipResultLog, "✅ IP written at offset +0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(textPtr) + ")");
+                    injected = true;
                 }
             }
         }
 
-        write_log(g_captureLog, "========== CAPTURE END ==========");
+        if (!injected) {
+            write_log(g_ipResultLog, "❌ Could not find writable text field");
+        }
+
     } catch (...) {
-        write_log(g_crashLog, "⚠️ Exception in capture_everything!");
+        write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
     }
 }
 
-// ======================== منو (بدون دکمه Inject، فقط Capture و ذخیره IP) ========================
+// ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_📡 Tools"),
+        OBFUSCATE("Category_🌐 Network Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Show IP"),               // featNum: 1
-        OBFUSCATE("Button_📡 Capture"),            // featNum: 2
+        OBFUSCATE("Button_Inject IP"),             // featNum: 1
+        OBFUSCATE("Button_Show IP"),               // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -213,6 +210,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
 
         case 1:
+            write_log(g_ipResultLog, "🔘 Inject button pressed");
+            inject_ip_to_game();
+            break;
+
+        case 2:
             {
                 std::string savedIP = load_ip();
                 if (!savedIP.empty()) {
@@ -221,13 +223,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             }
             break;
 
-        case 2:
-            write_log(g_captureLog, "🔘 Capture button pressed");
-            capture_everything();
-            break;
-
         default:
-            write_debug("Unknown featNum: " + std::to_string(featNum));
             break;
     }
 
@@ -236,7 +232,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 }
 
-// ======================== ترد اصلی (با هوک مثل objdata) ========================
+// ======================== ترد اصلی ========================
 void hack_thread() {
     const char* libName = "libil2cpp.so";
     int waitCount = 0;
@@ -255,16 +251,8 @@ void hack_thread() {
     write_debug("✅ " + std::string(libName) + " loaded!");
     g_targetIP = load_ip();
     if (!g_targetIP.empty()) {
-        write_debug("📌 Loaded IP from file: " + g_targetIP);
+        write_debug("📌 Loaded IP: " + g_targetIP);
     }
-
-#if defined(__aarch64__)
-    // ====== هوک روی set_text (آفست رو باید از دامپ پیدا کنی) ======
-    // آفست set_text رو از دامپ پیدا کن
-    // فعلاً اینجا خالیه
-#endif
-
-    write_debug("✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
