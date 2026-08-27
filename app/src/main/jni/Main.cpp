@@ -5,7 +5,6 @@
 #include <thread>
 #include <chrono>
 #include <ctime>
-#include <iomanip>
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
@@ -16,22 +15,20 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
+#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
+// ======================== آفست‌ها (فقط خام، مثل objdata) ========================
 #define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
-#define OFFSET_IP_INPUT2 0xD8   // MenuControl.ipInput
-#define OFFSET_IP_INPUT3 0x80   // ServerListAccess.ipAddressInput
 
-// ======================== مسیرها (همه توی lac) ========================
+// ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
-static std::string g_memoryDump = g_basePath + "memory_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -69,7 +66,6 @@ static void save_ip(const std::string& ip) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
-        write_log(g_ipResultLog, "📝 IP saved: " + ip);
     }
 }
 
@@ -122,28 +118,23 @@ static void install_crash_handler() {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     g_crashHandlerInstalled = true;
+    write_debug("✅ Crash handler installed");
 }
 
-// ======================== دامپ حافظه ========================
-static void dump_memory(uintptr_t addr, const std::string& label) {
-    if (addr == 0) return;
-    write_log(g_memoryDump, "📦 " + label + " at 0x" + std::to_string(addr));
-    for (int offset = 0; offset < 0x100; offset += 16) {
-        unsigned char data[16];
-        memcpy(data, (void*)(addr + offset), 16);
-        std::string hex;
-        char ascii[17] = {0};
-        for (int j = 0; j < 16; j++) {
-            char buf[4];
-            sprintf(buf, "%02X ", data[j]);
-            hex += buf;
-            ascii[j] = (data[j] >= 32 && data[j] <= 126) ? data[j] : '.';
-        }
-        write_log(g_memoryDump, "  +0x" + std::to_string(offset) + ": " + hex + "  " + std::string(ascii));
+// ======================== هوک روی تابع Write یا set_text (با آفست) ========================
+// این هوک مثل objdata هست، فقط روی تابع set_text
+void (*orig_SetText)(void *instance, void *text);
+void hook_SetText(void *instance, void *text) {
+    // اینجا می‌تونیم IP رو تغییر بدیم
+    // ولی فعلاً فقط لاگ می‌گیریم
+    write_debug("📌 SetText called with instance: " + std::to_string((uintptr_t)instance) + ", text: " + std::to_string((uintptr_t)text));
+    
+    if (orig_SetText) {
+        orig_SetText(instance, text);
     }
 }
 
-// ======================== کپچر کامل ========================
+// ======================== کپچر (فقط آفست، مثل objdata) ========================
 static void capture_everything() {
     try {
         write_log(g_captureLog, "========== CAPTURE START ==========");
@@ -157,31 +148,26 @@ static void capture_everything() {
             return;
         }
 
-        // ====== آفست‌های مختلف ======
-        uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
-        const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
-
-        for (int i = 0; i < 3; i++) {
-            uintptr_t addr = baseAddr + offsets[i];
-            uintptr_t ptr = 0;
-            memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
-
-            write_log(g_captureLog, "Offset " + std::string(offsetNames[i]) + " at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
-
-            if (ptr != 0) {
-                char buffer[256] = {0};
-                memcpy(buffer, (void*)ptr, 50);
-                write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
-                dump_memory(ptr, "InputField object at 0x" + std::to_string(ptr));
-            }
-        }
-
-        // ====== دامپ کامل حافظه اطراف pointer ======
-        uintptr_t ptr = 0;
+        // فقط آفست 0xC0 رو بخون
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
+        uintptr_t ptr = 0;
         memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+
+        write_log(g_captureLog, "Offset 0xC0 at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
+
         if (ptr != 0) {
-            dump_memory(ptr, "Full InputField object");
+            // آفست‌های احتمالی m_Text در InputField (از دامپ Unity)
+            uintptr_t textOffsets[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60};
+            for (int i = 0; i < 10; i++) {
+                uintptr_t textPtrAddr = ptr + textOffsets[i];
+                uintptr_t textPtr = 0;
+                memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
+                if (textPtr != 0) {
+                    char buffer[256] = {0};
+                    memcpy(buffer, (void*)textPtr, 50);
+                    write_log(g_captureLog, "  Offset +0x" + std::to_string(textOffsets[i]) + " → text pointer: 0x" + std::to_string(textPtr) + " → \"" + std::string(buffer) + "\"");
+                }
+            }
         }
 
         write_log(g_captureLog, "========== CAPTURE END ==========");
@@ -190,14 +176,14 @@ static void capture_everything() {
     }
 }
 
-// ======================== منو ========================
+// ======================== منو (بدون دکمه Inject، فقط Capture و ذخیره IP) ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_📡 Tools"),
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
         OBFUSCATE("Button_Show IP"),               // featNum: 1
-        OBFUSCATE("Button_📡 Capture All"),        // featNum: 2
+        OBFUSCATE("Button_📡 Capture"),            // featNum: 2
         OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -250,7 +236,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 }
 
-// ======================== ترد اصلی ========================
+// ======================== ترد اصلی (با هوک مثل objdata) ========================
 void hack_thread() {
     const char* libName = "libil2cpp.so";
     int waitCount = 0;
@@ -271,6 +257,14 @@ void hack_thread() {
     if (!g_targetIP.empty()) {
         write_debug("📌 Loaded IP from file: " + g_targetIP);
     }
+
+#if defined(__aarch64__)
+    // ====== هوک روی set_text (آفست رو باید از دامپ پیدا کنی) ======
+    // آفست set_text رو از دامپ پیدا کن
+    // فعلاً اینجا خالیه
+#endif
+
+    write_debug("✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
