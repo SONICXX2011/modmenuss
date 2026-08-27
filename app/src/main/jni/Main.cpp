@@ -15,11 +15,13 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
+#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0
+#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+#define OFFSET_M_TEXT    0x180  // InputField.m_Text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -64,7 +66,6 @@ static void save_ip(const std::string& ip) {
         f << ip << "\n";
         f.close();
         write_debug("IP saved: " + ip);
-        write_log(g_ipResultLog, "📝 IP saved: " + ip);
     }
 }
 
@@ -108,35 +109,29 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== تزریق IP با JNI (set_text) ========================
-static void inject_ip_to_game(JNIEnv *env, jobject obj) {
-    if (env == nullptr || obj == nullptr) {
-        write_log(g_ipResultLog, "❌ env or obj is null!");
-        return;
-    }
-
-    if (g_targetIP.empty()) {
-        g_targetIP = load_ip();
-        if (g_targetIP.empty()) {
-            write_log(g_ipResultLog, "❌ No IP found!");
-            return;
-        }
-    }
-
-    write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-
+// ======================== تزریق IP ========================
+static void inject_ip_to_game() {
     try {
-        // 1. پیدا کردن pointer از آفست 0xC0
+        if (g_targetIP.empty()) {
+            g_targetIP = load_ip();
+            if (g_targetIP.empty()) {
+                write_log(g_ipResultLog, "❌ No IP found!");
+                return;
+            }
+        }
+
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
         if (baseAddr == 0) {
             write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
             return;
         }
 
+        // 1. گرفتن پوینتر ipInput (0xC0)
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t inputFieldPtr = 0;
         memcpy(&inputFieldPtr, (void*)addr, sizeof(uintptr_t));
 
+        write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
         write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
 
         if (inputFieldPtr == 0) {
@@ -144,35 +139,21 @@ static void inject_ip_to_game(JNIEnv *env, jobject obj) {
             return;
         }
 
-        // 2. پیدا کردن کلاس InputField
-        jclass inputFieldClass = env->FindClass("UnityEngine/UI/InputField");
-        if (inputFieldClass == nullptr) {
-            env->ExceptionClear();
-            inputFieldClass = env->FindClass("UnityEngine.UI.InputField");
-            if (inputFieldClass == nullptr) {
-                env->ExceptionClear();
-                write_log(g_ipResultLog, "❌ InputField class not found!");
-                return;
-            }
-        }
+        // 2. گرفتن m_Text از آفست 0x180
+        uintptr_t textPtrAddr = inputFieldPtr + OFFSET_M_TEXT;
+        uintptr_t textPtr = 0;
+        memcpy(&textPtr, (void*)textPtrAddr, sizeof(uintptr_t));
 
-        // 3. پیدا کردن متد set_text
-        jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
-        if (setText == nullptr) {
-            env->ExceptionClear();
-            write_log(g_ipResultLog, "❌ set_text method not found!");
+        write_log(g_ipResultLog, "   m_Text pointer at 0x" + std::to_string(textPtrAddr) + " → 0x" + std::to_string(textPtr));
+
+        if (textPtr == 0) {
+            write_log(g_ipResultLog, "❌ m_Text pointer is null!");
             return;
         }
 
-        // 4. تبدیل pointer به jobject
-        jobject inputFieldObj = (jobject)inputFieldPtr;
-
-        // 5. ست کردن IP
-        jstring jip = env->NewStringUTF(g_targetIP.c_str());
-        env->CallVoidMethod(inputFieldObj, setText, jip);
-        env->DeleteLocalRef(jip);
-
-        write_log(g_ipResultLog, "✅ IP injected via JNI set_text: " + g_targetIP);
+        // 3. نوشتن IP
+        KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
+        write_log(g_ipResultLog, "✅ IP written at 0x" + std::to_string(textPtr));
 
     } catch (...) {
         write_log(g_crashLog, "⚠️ Exception in inject_ip_to_game!");
@@ -217,7 +198,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
         case 1:
             write_log(g_ipResultLog, "🔘 Inject button pressed");
-            inject_ip_to_game(env, obj);
+            inject_ip_to_game();
             break;
 
         case 2:
