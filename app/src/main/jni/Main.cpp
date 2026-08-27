@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <iomanip>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -28,6 +30,7 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
+static std::string g_dumpLog = g_basePath + "object_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -108,26 +111,82 @@ static void install_crash_handler() {
     g_crashHandlerInstalled = true;
 }
 
-// ======================== خوندن امن حافظه (با چک کامل) ========================
+// ======================== خوندن امن حافظه ========================
 static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
     if (addr == 0) return false;
-    
-    // چک با KittyMemory
     auto map = KittyMemory::getAddressMap((void*)addr);
     if (!map.readable) return false;
-    
-    // چک محدوده
     if (addr < map.startAddress || addr + len > map.endAddress) return false;
-    
-    // خوندن
     memcpy(buffer, (void*)addr, len);
     return true;
 }
 
-// ======================== تزریق IP با اسکن آفست‌ها ========================
+// ======================== دامپ کامل آبجکت ========================
+static void dump_object(uintptr_t objPtr) {
+    if (objPtr == 0) return;
+    
+    write_log(g_dumpLog, "\n========== OBJECT DUMP ==========");
+    write_log(g_dumpLog, "Object pointer: 0x" + std::to_string(objPtr));
+    write_log(g_dumpLog, "Time: " + get_time());
+    write_log(g_dumpLog, "----------------------------------------");
+    
+    // دامپ 0x200 بایت
+    for (int offset = 0; offset < 0x200; offset += 16) {
+        unsigned char data[16];
+        if (!safe_mem_read(objPtr + offset, data, 16)) {
+            continue;
+        }
+        
+        std::ostringstream line;
+        line << "+0x" << std::setw(3) << std::setfill('0') << std::hex << offset << ": ";
+        for (int i = 0; i < 16; i++) {
+            line << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+        }
+        line << " ";
+        for (int i = 0; i < 16; i++) {
+            char c = (data[i] >= 32 && data[i] <= 126) ? (char)data[i] : '.';
+            line << c;
+        }
+        
+        bool hasData = false;
+        for (int i = 0; i < 16; i++) {
+            if (data[i] != 0) { hasData = true; break; }
+        }
+        
+        if (hasData) {
+            write_log(g_dumpLog, line.str());
+        }
+    }
+    
+    // پیدا کردن string pointer ها
+    write_log(g_dumpLog, "\n🔍 String pointers found:");
+    for (int offset = 0; offset < 0x200; offset += 8) {
+        uintptr_t ptr = 0;
+        if (!safe_mem_read(objPtr + offset, &ptr, sizeof(uintptr_t))) continue;
+        
+        if (ptr != 0) {
+            char buffer[50] = {0};
+            if (safe_mem_read(ptr, buffer, 49)) {
+                bool isString = true;
+                for (int i = 0; i < 49 && buffer[i] != 0; i++) {
+                    if (buffer[i] < 32 || buffer[i] > 126) {
+                        isString = false;
+                        break;
+                    }
+                }
+                if (isString) {
+                    write_log(g_dumpLog, "+0x" + std::to_string(offset) + " → 0x" + std::to_string(ptr) + " → \"" + std::string(buffer) + "\"");
+                }
+            }
+        }
+    }
+    
+    write_log(g_dumpLog, "========== DUMP END ==========");
+}
+
+// ======================== تزریق IP با دامپ ========================
 static void inject_ip_to_game() {
     try {
-        // 1. IP رو از فایل بخون
         if (g_targetIP.empty()) {
             g_targetIP = load_ip();
             if (g_targetIP.empty()) {
@@ -136,14 +195,13 @@ static void inject_ip_to_game() {
             }
         }
 
-        // 2. base آدرس libil2cpp.so رو بگیر
         uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
         if (baseAddr == 0) {
             write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
             return;
         }
 
-        // 3. پوینتر ipInput رو از آفست 0xC0 بگیر
+        // گرفتن پوینتر ipInput
         uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
         uintptr_t inputFieldPtr = 0;
         if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
@@ -159,62 +217,30 @@ static void inject_ip_to_game() {
             return;
         }
 
-        // ====== 4. اسکن آفست‌های احتمالی m_Text ======
-        // این آفست‌ها از دامپ InputField جمع‌آوری شدن
+        // ====== دامپ کامل آبجکت ======
+        dump_object(inputFieldPtr);
+        write_log(g_ipResultLog, "📦 Object dumped to object_dump.txt");
+
+        // ====== اسکن آفست‌های احتمالی ======
         uintptr_t textOffsets[] = {
             0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50,
             0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88,
             0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
-            0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8,
-            0x100, 0x108, 0x110, 0x118, 0x120, 0x128,
-            0x130, 0x138, 0x140, 0x148, 0x150, 0x158,
-            0x160, 0x168, 0x170, 0x178, 0x180, 0x188,
-            0x190, 0x198, 0x1A0, 0x1A8, 0x1B0, 0x1B8
+            0x180, 0x108, 0x110, 0x148, 0x150, 0x158
         };
-
-        write_log(g_ipResultLog, "   🔍 Scanning offsets for m_Text...");
         bool injected = false;
 
         for (int i = 0; i < sizeof(textOffsets)/sizeof(textOffsets[0]) && !injected; i++) {
             uintptr_t textPtrAddr = inputFieldPtr + textOffsets[i];
             uintptr_t textPtr = 0;
-            
-            // خوندن pointer از آدرس مورد نظر
-            if (!safe_mem_read(textPtrAddr, &textPtr, sizeof(uintptr_t))) {
-                continue;
-            }
+            if (!safe_mem_read(textPtrAddr, &textPtr, sizeof(uintptr_t))) continue;
 
             if (textPtr != 0) {
-                // چک کردن اینکه آیا pointer به یک رشته معتبر اشاره میکنه
-                char buffer[50] = {0};
-                if (safe_mem_read(textPtr, buffer, 49)) {
-                    // بررسی اینکه آیا رشته قابل چاپ هست
-                    bool isString = true;
-                    int strLen = 0;
-                    for (int j = 0; j < 49 && buffer[j] != 0; j++) {
-                        if (buffer[j] < 32 || buffer[j] > 126) {
-                            isString = false;
-                            break;
-                        }
-                        strLen++;
-                    }
-
-                    if (isString && strLen > 1) {
-                        // چک کردن اینکه آیا حافظه قابل نوشتن هست
-                        auto map = KittyMemory::getAddressMap((void*)textPtr);
-                        if (map.writeable) {
-                            // نوشتن IP
-                            KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
-                            write_log(g_ipResultLog, "✅ IP written at offset +0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(textPtr) + ") → \"" + std::string(buffer) + "\"");
-                            injected = true;
-                        } else {
-                            write_log(g_ipResultLog, "   Offset +0x" + std::to_string(textOffsets[i]) + " → 0x" + std::to_string(textPtr) + " (not writable)");
-                        }
-                    } else {
-                        write_log(g_ipResultLog, "   Offset +0x" + std::to_string(textOffsets[i]) + " → 0x" + std::to_string(textPtr) + " (not a string)");
-                    }
-                } else {
-                    write_log(g_ipResultLog, "   Offset +0x" + std::to_string(textOffsets[i]) + " → 0x" + std::to_string(textPtr) + " (cannot read)");
+                auto map = KittyMemory::getAddressMap((void*)textPtr);
+                if (map.writeable) {
+                    KittyMemory::memWrite((void*)textPtr, g_targetIP.c_str(), g_targetIP.length() + 1);
+                    write_log(g_ipResultLog, "✅ IP written at offset +0x" + std::to_string(textOffsets[i]) + " (0x" + std::to_string(textPtr) + ")");
+                    injected = true;
                 }
             }
         }
