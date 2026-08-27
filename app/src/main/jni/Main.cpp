@@ -11,18 +11,13 @@
 #include "Menu/Menu.hpp"
 #include "Menu/Jni.hpp"
 
-// ======================== تعریف لایب با OBFUSCATE (برای هوک) ========================
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== مسیرهای ذخیره‌سازی ========================
 static std::string g_lastIPFile = "/sdcard/Download/last_ip.txt";
 static std::string g_networkLog = "/sdcard/Download/network_log.txt";
 static std::string g_debugLog = "/sdcard/Download/mod_debug.txt";
-
-// ======================== متغیرهای سراسری ========================
 static std::string g_targetIP = "";
 
-// ======================== توابع کمکی ========================
 static std::string get_current_time() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -46,7 +41,6 @@ static void log_network(const char* msg) {
         f.close();
     }
     LOGI("[Network] %s", msg);
-    write_debug("Network", msg);
 }
 
 static void save_ip_to_file(const std::string& ip) {
@@ -69,11 +63,8 @@ static std::string load_ip_from_file() {
     return "";
 }
 
-// ======================== نمایش Toast با JNI ========================
 static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int length) {
-    if (env == nullptr || obj == nullptr) {
-        return;
-    }
+    if (env == nullptr || obj == nullptr) return;
     
     jstring jmsg = env->NewStringUTF(msg.c_str());
     jclass toastClass = env->FindClass("android/widget/Toast");
@@ -104,27 +95,22 @@ static void show_toast(JNIEnv *env, jobject obj, const std::string& msg, int len
     env->DeleteLocalRef(toast);
 }
 
-// ======================== تزریق IP به بازی (با JNI) ========================
-static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
-    if (env == nullptr || obj == nullptr) {
+// ======================== تزریق IP با کلاس مشخص ========================
+static void inject_ip_with_class(JNIEnv *env, jobject obj, const std::string& ip, const char* className, const char* fieldName, const char* fieldType) {
+    if (env == nullptr || obj == nullptr) return;
+
+    jclass targetClass = env->FindClass(className);
+    if (targetClass == nullptr) {
+        show_toast(env, obj, std::string(className) + " not found!", 0);
         return;
     }
 
-    // پیدا کردن کلاس MenuControl
-    jclass menuClass = env->FindClass("MenuControl");
-    if (menuClass == nullptr) {
-        show_toast(env, obj, "MenuControl not found!", 0);
+    jfieldID field = env->GetFieldID(targetClass, fieldName, fieldType);
+    if (field == nullptr) {
+        show_toast(env, obj, std::string(fieldName) + " not found in " + className, 0);
         return;
     }
 
-    // پیدا کردن فیلد ipInput
-    jfieldID ipField = env->GetFieldID(menuClass, "ipInput", "LUnityEngine/UI/InputField;");
-    if (ipField == nullptr) {
-        show_toast(env, obj, "ipInput not found!", 0);
-        return;
-    }
-
-    // پیدا کردن instance MenuControl با FindObjectOfType
     jclass unityObjectClass = env->FindClass("UnityEngine/Object");
     if (unityObjectClass == nullptr) {
         show_toast(env, obj, "UnityEngine.Object not found!", 0);
@@ -141,20 +127,18 @@ static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
         return;
     }
 
-    jobject menuInstance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, menuClass);
-    if (menuInstance == nullptr) {
-        show_toast(env, obj, "MenuControl instance not found!", 0);
+    jobject instance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, targetClass);
+    if (instance == nullptr) {
+        show_toast(env, obj, std::string(className) + " instance not found!", 0);
         return;
     }
 
-    // گرفتن آبجکت ipInput
-    jobject inputField = env->GetObjectField(menuInstance, ipField);
+    jobject inputField = env->GetObjectField(instance, field);
     if (inputField == nullptr) {
-        show_toast(env, obj, "ipInput is null!", 0);
+        show_toast(env, obj, fieldName + " is null!", 0);
         return;
     }
 
-    // ست کردن IP با متد set_text
     jclass inputFieldClass = env->FindClass("UnityEngine/UI/InputField");
     if (inputFieldClass == nullptr) {
         show_toast(env, obj, "InputField class not found!", 0);
@@ -171,7 +155,7 @@ static void inject_ip_to_game(JNIEnv *env, jobject obj, const std::string& ip) {
     env->CallVoidMethod(inputField, setText, jip);
     env->DeleteLocalRef(jip);
 
-    show_toast(env, obj, "IP Injected: " + ip, 1);
+    show_toast(env, obj, std::string("✅ ").append(className).append(": ").append(ip), 1);
 }
 
 // ======================== لیست ویژگی‌های منو ========================
@@ -179,9 +163,14 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP Address"),    // featNum: 0
-        OBFUSCATE("Button_Apply IP"),               // featNum: 1
-        OBFUSCATE("Button_Show Saved IP"),          // featNum: 2
+        OBFUSCATE("InputText_Enter IP Address"),           // featNum: 0
+        
+        OBFUSCATE("Button_Apply: MenuControl"),            // featNum: 1
+        OBFUSCATE("Button_Apply: GtaMenuControl"),         // featNum: 2
+        OBFUSCATE("Button_Apply: ServerListAccess"),       // featNum: 3
+        OBFUSCATE("Button_Apply: AutoRunLinuxServer"),     // featNum: 4
+        
+        OBFUSCATE("Button_Show Saved IP"),                 // featNum: 5
         OBFUSCATE("RichTextView_IP Status: <font color='yellow'>Ready</font>"),
     };
     int total = sizeof features / sizeof features[0];
@@ -202,34 +191,107 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 
     switch (featNum) {
-        case 0: // InputText_Enter IP Address
+        case 0: // Input IP
             if (textStr != nullptr) {
                 g_targetIP = textStr;
                 save_ip_to_file(g_targetIP);
                 show_toast(env, obj, "IP saved: " + g_targetIP, 0);
-            } else {
-                show_toast(env, obj, "No IP entered!", 0);
             }
             break;
 
-        case 1: // Button_Apply IP
-            if (g_targetIP.empty()) {
-                g_targetIP = load_ip_from_file();
-            }
+        case 1: // Button_Apply: MenuControl
+            if (g_targetIP.empty()) g_targetIP = load_ip_from_file();
             if (!g_targetIP.empty()) {
-                inject_ip_to_game(env, obj, g_targetIP);
+                inject_ip_with_class(env, obj, g_targetIP, "MenuControl", "ipInput", "LUnityEngine/UI/InputField;");
             } else {
-                show_toast(env, obj, "No IP found! Enter IP first.", 0);
+                show_toast(env, obj, "No IP found!", 0);
             }
             break;
 
-        case 2: // Button_Show Saved IP
+        case 2: // Button_Apply: GtaMenuControl
+            if (g_targetIP.empty()) g_targetIP = load_ip_from_file();
+            if (!g_targetIP.empty()) {
+                inject_ip_with_class(env, obj, g_targetIP, "GtaMenuControl", "ipInput", "LUnityEngine/UI/InputField;");
+            } else {
+                show_toast(env, obj, "No IP found!", 0);
+            }
+            break;
+
+        case 3: // Button_Apply: ServerListAccess
+            if (g_targetIP.empty()) g_targetIP = load_ip_from_file();
+            if (!g_targetIP.empty()) {
+                inject_ip_with_class(env, obj, g_targetIP, "ServerListAccess", "ipAddressInput", "LUnityEngine/UI/InputField;");
+            } else {
+                show_toast(env, obj, "No IP found!", 0);
+            }
+            break;
+
+        case 4: // Button_Apply: AutoRunLinuxServer (از طریق _menuControl)
+            if (g_targetIP.empty()) g_targetIP = load_ip_from_file();
+            if (!g_targetIP.empty()) {
+                // این یکی خاصه: اول AutoRunLinuxServer رو پیدا میکنه، بعد _menuControl رو میگیره
+                jclass targetClass = env->FindClass("AutoRunLinuxServer");
+                if (targetClass == nullptr) {
+                    show_toast(env, obj, "AutoRunLinuxServer not found!", 0);
+                    break;
+                }
+                
+                jfieldID menuControlField = env->GetFieldID(targetClass, "_menuControl", "LGtaMenuControl;");
+                if (menuControlField == nullptr) {
+                    show_toast(env, obj, "_menuControl not found!", 0);
+                    break;
+                }
+                
+                jclass unityObjectClass = env->FindClass("UnityEngine/Object");
+                jmethodID findObjectMethod = env->GetStaticMethodID(unityObjectClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
+                jobject instance = env->CallStaticObjectMethod(unityObjectClass, findObjectMethod, targetClass);
+                if (instance == nullptr) {
+                    show_toast(env, obj, "AutoRunLinuxServer instance not found!", 0);
+                    break;
+                }
+                
+                jobject menuControl = env->GetObjectField(instance, menuControlField);
+                if (menuControl == nullptr) {
+                    show_toast(env, obj, "_menuControl is null!", 0);
+                    break;
+                }
+                
+                jclass gtaMenuClass = env->FindClass("GtaMenuControl");
+                jfieldID ipField = env->GetFieldID(gtaMenuClass, "ipInput", "LUnityEngine/UI/InputField;");
+                if (ipField == nullptr) {
+                    show_toast(env, obj, "ipInput not found in GtaMenuControl!", 0);
+                    break;
+                }
+                
+                jobject inputField = env->GetObjectField(menuControl, ipField);
+                if (inputField == nullptr) {
+                    show_toast(env, obj, "ipInput is null!", 0);
+                    break;
+                }
+                
+                jclass inputFieldClass = env->FindClass("UnityEngine/UI/InputField");
+                jmethodID setText = env->GetMethodID(inputFieldClass, "set_text", "(Ljava/lang/String;)V");
+                if (setText == nullptr) {
+                    show_toast(env, obj, "set_text not found!", 0);
+                    break;
+                }
+                
+                jstring jip = env->NewStringUTF(g_targetIP.c_str());
+                env->CallVoidMethod(inputField, setText, jip);
+                env->DeleteLocalRef(jip);
+                show_toast(env, obj, "✅ AutoRunLinuxServer: " + g_targetIP, 1);
+            } else {
+                show_toast(env, obj, "No IP found!", 0);
+            }
+            break;
+
+        case 5: // Show Saved IP
             {
                 std::string savedIP = load_ip_from_file();
                 if (!savedIP.empty()) {
                     show_toast(env, obj, "Saved IP: " + savedIP, 1);
                 } else {
-                    show_toast(env, obj, "No saved IP found!", 0);
+                    show_toast(env, obj, "No saved IP!", 0);
                 }
             }
             break;
@@ -243,45 +305,23 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 }
 
-// ======================== ترد اصلی (منتظر لود شدن لایب) ========================
 void hack_thread() {
-    // استفاده از متغیر معمولی برای لاگ (نه OBFUSCATE)
     const char* libName = "libil2cpp.so";
-    
-    write_debug("Init", "hack_thread started");
-
     int waitCount = 0;
-    LOGI("[Network] Waiting for %s ...", libName);
     while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
         sleep(1);
         waitCount++;
     }
-
-    if (waitCount >= 30) {
-        LOGI("[Network] Timeout: %s not loaded", libName);
-        write_debug("ERROR", "Timeout waiting for libil2cpp.so");
-        return;
-    }
-
-    LOGI("[Network] %s loaded!", libName);
-    write_debug("Init", "libil2cpp.so loaded");
-
-    // بارگذاری IP ذخیره‌شده از فایل
+    if (waitCount >= 30) return;
     std::string savedIP = load_ip_from_file();
     if (!savedIP.empty()) {
         g_targetIP = savedIP;
         LOGI("[Network] Loaded saved IP: %s", savedIP.c_str());
-        write_debug("IP", ("Loaded saved IP: " + savedIP).c_str());
     }
-
-    LOGI("[Network] hack_thread finished");
-    write_debug("Init", "hack_thread finished");
 }
 
-// ======================== تابع ورودی (constructor) ========================
 __attribute__((constructor))
 void lib_main() {
-    // ایجاد فایل دیباگ
     std::ofstream f(g_debugLog);
     if (f.is_open()) {
         f << "========== MOD LOADED ==========\n";
@@ -289,16 +329,5 @@ void lib_main() {
         f << "===============================\n\n";
         f.close();
     }
-
-    // ایجاد فایل لاگ شبکه
-    std::ofstream f2(g_networkLog);
-    if (f2.is_open()) {
-        f2 << "========== NETWORK LOG ==========\n";
-        f2 << "Time: " << get_current_time() << "\n";
-        f2 << "================================\n\n";
-        f2.close();
-    }
-
-    write_debug("Init", "lib_main called");
     std::thread(hack_thread).detach();
 }
