@@ -19,9 +19,10 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ) ========================
-#define OFFSET_IP_INPUT  0xC0          // GtaMenuControl.ipInput
-#define OFFSET_SET_TEXT  0x205DA44     // InputField.set_text (آفست درست!)
+// ======================== آفست‌ها ========================
+#define OFFSET_GTA_START  0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_IP_INPUT   0xC0          // GtaMenuControl.ipInput
+#define OFFSET_SET_TEXT   0x1FF6794     // InputField.set_text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -33,6 +34,8 @@ static std::string g_crashLog = g_basePath + "crash_log.txt";
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
+static void* g_gtaMenuInstance = nullptr;
+static bool g_gtaMenuReady = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -119,10 +122,37 @@ static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
     return true;
 }
 
-// ======================== تزریق IP با set_text ========================
+// ======================== هوک روی GtaMenuControl.Start ========================
+void (*orig_GtaMenuStart)(void *instance);
+void hook_GtaMenuStart(void *instance) {
+    write_debug("🎯 GtaMenuControl.Start() called!");
+    
+    if (instance != nullptr) {
+        g_gtaMenuInstance = instance;
+        g_gtaMenuReady = true;
+        write_debug("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
+        
+        // بارگذاری IP
+        g_targetIP = load_ip();
+        if (!g_targetIP.empty()) {
+            write_debug("📌 Loaded IP: " + g_targetIP);
+        }
+    }
+    
+    if (orig_GtaMenuStart) {
+        orig_GtaMenuStart(instance);
+    }
+}
+
+// ======================== تزریق IP با استفاده از instance ذخیره شده ========================
 static void inject_ip_to_game(JNIEnv* env, jobject obj) {
     if (env == nullptr || obj == nullptr) {
         write_log(g_ipResultLog, "❌ env or obj is null!");
+        return;
+    }
+
+    if (!g_gtaMenuReady || g_gtaMenuInstance == nullptr) {
+        write_log(g_ipResultLog, "❌ GtaMenuControl not ready yet!");
         return;
     }
 
@@ -135,30 +165,31 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
             }
         }
 
-        uintptr_t baseAddr = getLibraryAddress("libil2cpp.so");
-        if (baseAddr == 0) {
-            write_log(g_ipResultLog, "❌ libil2cpp.so not loaded!");
+        // ====== 1. گرفتن ipInput از instance ======
+        jclass gtaMenuClass = env->GetObjectClass((jobject)g_gtaMenuInstance);
+        if (gtaMenuClass == nullptr) {
+            write_log(g_ipResultLog, "❌ GtaMenuControl class not found!");
             return;
         }
 
-        // 1. گرفتن پوینتر ipInput
-        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t inputFieldPtr = 0;
-        if (!safe_mem_read(addr, &inputFieldPtr, sizeof(uintptr_t))) {
-            write_log(g_ipResultLog, "❌ Cannot read ipInput pointer!");
+        jfieldID ipField = env->GetFieldID(gtaMenuClass, "ipInput", "LUnityEngine/UI/InputField;");
+        if (ipField == nullptr) {
+            env->ExceptionClear();
+            write_log(g_ipResultLog, "❌ ipInput field not found!");
+            return;
+        }
+
+        jobject inputField = env->GetObjectField((jobject)g_gtaMenuInstance, ipField);
+        if (inputField == nullptr) {
+            write_log(g_ipResultLog, "❌ ipInput is null!");
             return;
         }
 
         write_log(g_ipResultLog, "🔄 Injecting IP: " + g_targetIP);
-        write_log(g_ipResultLog, "   InputField pointer: 0x" + std::to_string(inputFieldPtr));
+        write_log(g_ipResultLog, "   InputField object from GtaMenuControl instance");
 
-        if (inputFieldPtr == 0) {
-            write_log(g_ipResultLog, "❌ InputField pointer is null!");
-            return;
-        }
-
-        // 2. گرفتن آدرس set_text (آفست درست از دامپ)
-        void* setTextAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x205DA44"));
+        // ====== 2. گرفتن آدرس set_text ======
+        void* setTextAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1FF6794"));
         if (setTextAddr == nullptr) {
             write_log(g_ipResultLog, "❌ set_text address not found!");
             return;
@@ -166,15 +197,12 @@ static void inject_ip_to_game(JNIEnv* env, jobject obj) {
 
         write_log(g_ipResultLog, "   set_text address: 0x" + std::to_string((uintptr_t)setTextAddr));
 
-        // 3. تعریف تابع set_text
+        // ====== 3. تعریف و صدا زدن set_text ======
         typedef void (*SetTextFunc)(void* instance, void* monoString);
         SetTextFunc setText = (SetTextFunc)setTextAddr;
 
-        // 4. تبدیل IP به jstring (monoString)
         jstring jip = env->NewStringUTF(g_targetIP.c_str());
-
-        // 5. صدا زدن set_text
-        setText((void*)inputFieldPtr, (void*)jip);
+        setText((void*)inputField, (void*)jip);
         env->DeleteLocalRef(jip);
 
         write_log(g_ipResultLog, "✅ IP injected via set_text: " + g_targetIP);
@@ -264,6 +292,23 @@ void hack_thread() {
     if (!g_targetIP.empty()) {
         write_debug("📌 Loaded IP from file: " + g_targetIP);
     }
+
+#if defined(__aarch64__)
+    // ====== هوک روی GtaMenuControl.Start ======
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr != nullptr) {
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_debug("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
+        } else {
+            write_debug("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
+        }
+    } else {
+        write_debug("❌ GtaMenuControl.Start() address not found!");
+    }
+#endif
+
+    write_debug("✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
