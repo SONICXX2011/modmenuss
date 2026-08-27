@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
@@ -19,15 +20,18 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_IP_INPUT  0xC0
+#define OFFSET_IP_INPUT  0xC0   // GtaMenuControl.ipInput
+#define OFFSET_IP_INPUT2 0xD8   // MenuControl.ipInput
+#define OFFSET_IP_INPUT3 0x80   // ServerListAccess.ipAddressInput
 
-// ======================== مسیرها ========================
+// ======================== مسیرها (همه توی lac) ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_captureLog = g_basePath + "capture_log.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
+static std::string g_memoryDump = g_basePath + "memory_dump.txt";
 
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
@@ -118,7 +122,25 @@ static void install_crash_handler() {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     g_crashHandlerInstalled = true;
-    write_debug("✅ Crash handler installed");
+}
+
+// ======================== دامپ حافظه ========================
+static void dump_memory(uintptr_t addr, const std::string& label) {
+    if (addr == 0) return;
+    write_log(g_memoryDump, "📦 " + label + " at 0x" + std::to_string(addr));
+    for (int offset = 0; offset < 0x100; offset += 16) {
+        unsigned char data[16];
+        memcpy(data, (void*)(addr + offset), 16);
+        std::string hex;
+        char ascii[17] = {0};
+        for (int j = 0; j < 16; j++) {
+            char buf[4];
+            sprintf(buf, "%02X ", data[j]);
+            hex += buf;
+            ascii[j] = (data[j] >= 32 && data[j] <= 126) ? data[j] : '.';
+        }
+        write_log(g_memoryDump, "  +0x" + std::to_string(offset) + ": " + hex + "  " + std::string(ascii));
+    }
 }
 
 // ======================== کپچر کامل ========================
@@ -135,30 +157,31 @@ static void capture_everything() {
             return;
         }
 
-        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
-        uintptr_t ptr = 0;
-        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+        // ====== آفست‌های مختلف ======
+        uintptr_t offsets[] = {OFFSET_IP_INPUT, OFFSET_IP_INPUT2, OFFSET_IP_INPUT3};
+        const char* offsetNames[] = {"GtaMenuControl.ipInput (0xC0)", "MenuControl.ipInput (0xD8)", "ServerListAccess.ipAddressInput (0x80)"};
 
-        write_log(g_captureLog, "Offset GtaMenuControl.ipInput (0xC0) at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
+        for (int i = 0; i < 3; i++) {
+            uintptr_t addr = baseAddr + offsets[i];
+            uintptr_t ptr = 0;
+            memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
 
-        if (ptr != 0) {
-            char buffer[256] = {0};
-            memcpy(buffer, (void*)ptr, 50);
-            write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
-            
-            // ====== دامپ کامل InputField object ======
-            write_log(g_captureLog, "📦 InputField object dump:");
-            for (int offset = 0; offset < 0x100; offset += 16) {
-                unsigned char data[16];
-                memcpy(data, (void*)(ptr + offset), 16);
-                std::string hex;
-                for (int j = 0; j < 16; j++) {
-                    char buf[4];
-                    sprintf(buf, "%02X ", data[j]);
-                    hex += buf;
-                }
-                write_log(g_captureLog, "  +0x" + std::to_string(offset) + ": " + hex);
+            write_log(g_captureLog, "Offset " + std::string(offsetNames[i]) + " at 0x" + std::to_string(addr) + " → pointer: 0x" + std::to_string(ptr));
+
+            if (ptr != 0) {
+                char buffer[256] = {0};
+                memcpy(buffer, (void*)ptr, 50);
+                write_log(g_captureLog, "   Value: \"" + std::string(buffer) + "\"");
+                dump_memory(ptr, "InputField object at 0x" + std::to_string(ptr));
             }
+        }
+
+        // ====== دامپ کامل حافظه اطراف pointer ======
+        uintptr_t ptr = 0;
+        uintptr_t addr = baseAddr + OFFSET_IP_INPUT;
+        memcpy(&ptr, (void*)addr, sizeof(uintptr_t));
+        if (ptr != 0) {
+            dump_memory(ptr, "Full InputField object");
         }
 
         write_log(g_captureLog, "========== CAPTURE END ==========");
