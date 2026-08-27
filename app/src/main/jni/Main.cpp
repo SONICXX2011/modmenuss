@@ -1,3 +1,6 @@
+<<<<<<< HEAD
+.
+=======
 #include <list>
 #include <vector>
 #include <cstring>
@@ -451,3 +454,4 @@ void lib_main() {
     write_debug("Init", "lib_main called");
     std::thread(hack_thread).detach();
 }
+>>>>>>> 1d4a6c3 (Update project)
