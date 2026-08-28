@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <vector>
 #include <sstream>
+#include <cstdlib>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -38,13 +39,14 @@ static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_reportLog = g_basePath + "full_report.txt";
 static std::string g_configFile = g_basePath + "buttons_config.txt";
+static std::string g_applyLog = g_basePath + "apply_log.txt";
 
 static bool g_crashHandlerInstalled = false;
 static bool g_buttonsDisabled = false;
 static void* g_gtaInstance = nullptr;
 
-// ======================== لیست ایندکس‌های دیسیبل ========================
-static bool g_disableState[MAX_BUTTONS] = {false};
+// ======================== لیست ایندکس‌های دیسیبل (از InputText) ========================
+static std::vector<int> g_selectedIndices;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -69,6 +71,10 @@ static void write_report(const std::string& msg) {
 
 static void write_result(const std::string& msg) {
     write_log(g_ipResultLog, msg);
+}
+
+static void write_apply_log(const std::string& msg) {
+    write_log(g_applyLog, msg);
 }
 
 static void create_directory() {
@@ -154,28 +160,52 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
+// ======================== parse کردن ایندکس‌های وارد شده ========================
+static std::vector<int> parse_indices(const std::string& input) {
+    std::vector<int> result;
+    std::stringstream ss(input);
+    std::string token;
+    
+    while (std::getline(ss, token, ',')) {
+        // حذف فاصله‌های اضافی
+        token.erase(0, token.find_first_not_of(" \t\n\r"));
+        token.erase(token.find_last_not_of(" \t\n\r") + 1);
+        
+        if (token.empty()) continue;
+        
+        char* endptr;
+        long val = strtol(token.c_str(), &endptr, 10);
+        if (*endptr == '\0' && val >= 0 && val < MAX_BUTTONS) {
+            result.push_back((int)val);
+        } else {
+            write_report("   ⚠️ Invalid index: " + token);
+        }
+    }
+    return result;
+}
+
 // ======================== دیسیبل کردن یک ایندکس ========================
-static void disable_single_index(int index) {
+static bool disable_single_index(int index, bool log_enabled) {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No instance for index " + std::to_string(index));
-        return;
+        if (log_enabled) write_report("   ❌ No instance for index " + std::to_string(index));
+        return false;
     }
     
     void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
     if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        write_report("❌ menuButtons invalid");
-        return;
+        if (log_enabled) write_report("   ❌ menuButtons invalid");
+        return false;
     }
     
     if (index < 0 || index >= MAX_BUTTONS) {
-        write_report("❌ Index out of range: " + std::to_string(index));
-        return;
+        if (log_enabled) write_report("   ❌ Index out of range: " + std::to_string(index));
+        return false;
     }
     
     void* btn = menuButtons[index];
     if (btn == nullptr || !is_valid_address(btn)) {
-        write_report("❌ Button at index " + std::to_string(index) + " is invalid");
-        return;
+        if (log_enabled) write_report("   ❌ Button at index " + std::to_string(index) + " is invalid");
+        return false;
     }
     
     bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
@@ -193,32 +223,53 @@ static void disable_single_index(int index) {
         *groupsAllow = false;
     }
     
-    write_report("   ❌ Disabled index " + std::to_string(index));
+    if (log_enabled) {
+        write_report("   ❌ Disabled index " + std::to_string(index));
+        write_apply_log("   Disabled index " + std::to_string(index));
+    }
+    return true;
 }
 
-// ======================== اعمال دیسیبل کردن ========================
-static void apply_disabled() {
+// ======================== اعمال دیسیبل کردن بر اساس لیست ========================
+static void apply_selected_indices() {
+    if (g_selectedIndices.empty()) {
+        write_report("⚠️ No indices selected to disable!");
+        write_result("⚠️ No indices selected!");
+        return;
+    }
+    
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
         write_report("❌ No instance for apply");
         write_result("❌ No instance");
         return;
     }
     
-    write_report("\n========== APPLY DISABLED ==========");
+    write_report("\n========== APPLY SELECTED INDICES ==========");
     write_report("Time: " + get_time());
+    write_apply_log("\n========== APPLY LOG ==========");
+    write_apply_log("Time: " + get_time());
     
-    int count = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        if (g_disableState[i]) {
-            disable_single_index(i);
-            count++;
+    std::string indicesStr;
+    for (size_t i = 0; i < g_selectedIndices.size(); i++) {
+        if (i > 0) indicesStr += ", ";
+        indicesStr += std::to_string(g_selectedIndices[i]);
+    }
+    write_report("📌 Indices to disable: " + indicesStr);
+    write_apply_log("📌 Indices to disable: " + indicesStr);
+    
+    int successCount = 0;
+    for (int idx : g_selectedIndices) {
+        if (disable_single_index(idx, true)) {
+            successCount++;
         }
     }
     
     g_buttonsDisabled = true;
-    write_report("✅ Applied " + std::to_string(count) + " indices");
-    write_result("✅ Applied " + std::to_string(count) + " indices");
+    write_report("✅ Successfully disabled " + std::to_string(successCount) + " of " + std::to_string(g_selectedIndices.size()) + " indices");
+    write_apply_log("✅ Successfully disabled " + std::to_string(successCount) + " of " + std::to_string(g_selectedIndices.size()) + " indices");
+    write_result("✅ Disabled " + std::to_string(successCount) + " indices");
     write_report("========== DONE ==========\n");
+    write_apply_log("========== DONE ==========\n");
 }
 
 // ======================== فعال کردن همه ========================
@@ -256,26 +307,24 @@ static void enable_all() {
         }
     }
     
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        g_disableState[i] = false;
-    }
+    g_selectedIndices.clear();
     g_buttonsDisabled = false;
     write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
     write_result("✅ Enabled all buttons");
+    write_apply_log("✅ Enabled all buttons");
 }
 
 // ======================== ذخیره تنظیمات ========================
 static void save_config() {
     std::ofstream f(g_configFile);
     if (f.is_open()) {
-        for (int i = 0; i < MAX_BUTTONS; i++) {
-            if (g_disableState[i]) {
-                f << i << "\n";
-            }
+        for (int idx : g_selectedIndices) {
+            f << idx << "\n";
         }
         f.close();
-        write_report("✅ Config saved");
+        write_report("✅ Config saved (" + std::to_string(g_selectedIndices.size()) + " indices)");
         write_result("✅ Config saved");
+        write_apply_log("✅ Config saved: " + std::to_string(g_selectedIndices.size()) + " indices");
     } else {
         write_report("❌ Failed to save config");
     }
@@ -283,37 +332,29 @@ static void save_config() {
 
 // ======================== بارگذاری تنظیمات ========================
 static void load_config() {
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        g_disableState[i] = false;
-    }
+    g_selectedIndices.clear();
     
     std::ifstream f(g_configFile);
     if (f.is_open()) {
         int idx;
         while (f >> idx) {
             if (idx >= 0 && idx < MAX_BUTTONS) {
-                g_disableState[idx] = true;
+                g_selectedIndices.push_back(idx);
             }
         }
         f.close();
-        write_report("✅ Config loaded");
+        write_report("✅ Config loaded (" + std::to_string(g_selectedIndices.size()) + " indices)");
     } else {
-        write_report("⚠️ No config, default: keep 0 and 4 active");
-        for (int i = 0; i < MAX_BUTTONS; i++) {
-            if (i != 0 && i != 4) {
-                g_disableState[i] = true;
-            }
-        }
+        write_report("⚠️ No config file");
     }
 }
 
-// ======================== منو (ساده، فقط ۴ دکمه) ========================
+// ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     load_config();
     
-    // ====== تعداد المان‌ها ======
-    // 1 Category + 4 Button = 5
-    const int totalFeatures = 5;
+    // 6 المان: Category, InputText, 3 دکمه, RichTextView
+    const int totalFeatures = 6;
     
     jobjectArray ret = (jobjectArray)env->NewObjectArray(
         totalFeatures,
@@ -327,7 +368,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     }
     
     int idx = 0;
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Manager")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Disabler")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("InputText_Enter Indices (e.g. 0,4,5)")));
     env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Apply Selected")));
     env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Enable All")));
     env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Extract & Save")));
@@ -341,20 +383,49 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
-    // 0 = Apply, 1 = Enable All, 2 = Extract & Save
+    // featNum 0 = InputText (ورودی ایندکس‌ها)
+    // featNum 1 = Apply Selected
+    // featNum 2 = Enable All
+    // featNum 3 = Extract & Save
+    
     switch (featNum) {
-        case 0:
-            write_report("🔘 Apply Selected pressed");
-            apply_disabled();
+        case 0: {
+            // ====== InputText: دریافت ایندکس‌ها ======
+            const char* textStr = (text != nullptr) ? env->GetStringUTFChars(text, nullptr) : "";
+            if (textStr != nullptr && strlen(textStr) > 0) {
+                std::string input(textStr);
+                g_selectedIndices = parse_indices(input);
+                write_report("📝 Indices entered: " + input);
+                write_report("📌 Parsed " + std::to_string(g_selectedIndices.size()) + " indices");
+                write_result("📝 Entered: " + input + " -> " + std::to_string(g_selectedIndices.size()) + " indices");
+                env->ReleaseStringUTFChars(text, textStr);
+            } else {
+                write_report("⚠️ Empty input");
+            }
             break;
+        }
+        
         case 1:
+            // ====== Apply Selected ======
+            write_report("🔘 Apply Selected pressed");
+            write_result("🔘 Apply Selected pressed");
+            apply_selected_indices();
+            break;
+            
+        case 2:
+            // ====== Enable All ======
             write_report("🔘 Enable All pressed");
+            write_result("🔘 Enable All pressed");
             enable_all();
             break;
-        case 2:
+            
+        case 3:
+            // ====== Extract & Save ======
             write_report("🔘 Extract & Save pressed");
+            write_result("🔘 Extract & Save pressed");
             save_config();
             break;
+            
         default:
             write_report("Unknown featNum: " + std::to_string(featNum));
             break;
