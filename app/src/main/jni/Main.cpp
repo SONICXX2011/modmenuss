@@ -24,10 +24,11 @@
 #define OFFSET_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
 #define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_IP_INPUT         0xC0          // GtaMenuControl.ipInput
+#define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
 #define OFFSET_M_TEXT_COMPONENT 0x108         // InputField.m_TextComponent
-#define OFFSET_M_TEXT           0x180         // InputField.m_Text (string)
+#define OFFSET_M_TEXT           0x180         // InputField.m_Text
 #define OFFSET_SET_TEXT_RTL     0x1034114     // RtlText.set_text
-#define OFFSET_SET_TEXT_BASE    0x207D24C     // Text.set_text (کلاس پایه)
+#define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
 
 // ======================== IP پیش‌فرض ========================
 #define DEFAULT_IP "5.57.37.224"
@@ -46,6 +47,7 @@ static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_gtaReady = false;
+static bool g_buttonsDisabled = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -151,77 +153,6 @@ static void* create_mono_string(const char* str) {
     return il2cpp_string_new(str);
 }
 
-// ======================== روش‌های تزریق IP ========================
-
-// روش 1: استفاده از RtlText.set_text (روش اصلی - توصیه شده)
-static bool inject_ip_method_1(void* textComponent, const std::string& ip) {
-    write_report("   Method 1: Using RtlText.set_text (0x1034114)");
-    
-    typedef void (*set_text_rtl_t)(void* textComponent, void* monoString);
-    set_text_rtl_t set_text_rtl = (set_text_rtl_t)getAbsoluteAddress("libil2cpp.so", "RtlText.set_text");
-    
-    if (set_text_rtl == nullptr) {
-        write_report("   ❌ RtlText.set_text not found!");
-        return false;
-    }
-    
-    void* monoString = create_mono_string(ip.c_str());
-    if (monoString == nullptr) {
-        write_report("   ❌ Failed to create mono string!");
-        return false;
-    }
-    
-    set_text_rtl(textComponent, monoString);
-    write_report("   ✅ IP injected via RtlText.set_text");
-    return true;
-}
-
-// روش 2: استفاده از Text.set_text (کلاس پایه)
-static bool inject_ip_method_2(void* textComponent, const std::string& ip) {
-    write_report("   Method 2: Using Text.set_text (base class)");
-    
-    typedef void (*set_text_base_t)(void* textComponent, void* monoString);
-    set_text_base_t set_text_base = (set_text_base_t)getAbsoluteAddress("libil2cpp.so", "Text.set_text");
-    
-    if (set_text_base == nullptr) {
-        write_report("   ❌ Text.set_text not found!");
-        return false;
-    }
-    
-    void* monoString = create_mono_string(ip.c_str());
-    if (monoString == nullptr) {
-        write_report("   ❌ Failed to create mono string!");
-        return false;
-    }
-    
-    set_text_base(textComponent, monoString);
-    write_report("   ✅ IP injected via Text.set_text");
-    return true;
-}
-
-// روش 3: نوشتن مستقیم در m_Text (آفست 0x180)
-static bool inject_ip_method_3(void* ipInputField, const std::string& ip) {
-    write_report("   Method 3: Direct m_Text write (0x180)");
-    
-    uintptr_t mTextAddr = (uintptr_t)ipInputField + OFFSET_M_TEXT;
-    void** mTextPtr = (void**)mTextAddr;
-    
-    if (mTextPtr == nullptr) {
-        write_report("   ❌ m_Text pointer is null!");
-        return false;
-    }
-    
-    void* monoString = create_mono_string(ip.c_str());
-    if (monoString == nullptr) {
-        write_report("   ❌ Failed to create mono string!");
-        return false;
-    }
-    
-    *mTextPtr = monoString;
-    write_report("   ✅ IP injected via m_Text direct write");
-    return true;
-}
-
 // ======================== تزریق IP به ipInput ========================
 static bool inject_ip_to_ipInput(const std::string& ip) {
     write_report("\n========== INJECT IP TO IPINPUT ==========");
@@ -257,39 +188,26 @@ static bool inject_ip_to_ipInput(const std::string& ip) {
         }
         write_report("✅ m_TextComponent: 0x" + std::to_string((uintptr_t)textComponent));
 
-        // ====== 3. تزریق IP با روش‌های مختلف ======
-        write_report("Step 3: Injecting IP with multiple methods...");
+        // ====== 3. تزریق IP با RtlText.set_text ======
+        write_report("Step 3: Injecting IP with RtlText.set_text");
+        typedef void (*set_text_rtl_t)(void* textComponent, void* monoString);
+        set_text_rtl_t set_text_rtl = (set_text_rtl_t)getAbsoluteAddress("libil2cpp.so", "RtlText.set_text");
         
-        bool injected = false;
-        
-        // روش اول: RtlText.set_text
-        if (!injected) {
-            if (inject_ip_method_1(textComponent, ip)) {
-                injected = true;
-            }
-        }
-        
-        // روش دوم: Text.set_text
-        if (!injected) {
-            if (inject_ip_method_2(textComponent, ip)) {
-                injected = true;
-            }
-        }
-        
-        // روش سوم: m_Text مستقیم
-        if (!injected) {
-            if (inject_ip_method_3(ipInputField, ip)) {
-                injected = true;
-            }
-        }
-
-        if (!injected) {
-            write_report("❌ All injection methods failed!");
-            write_log(g_ipResultLog, "❌ All injection methods failed!");
+        if (set_text_rtl == nullptr) {
+            write_report("❌ RtlText.set_text not found!");
+            write_log(g_ipResultLog, "❌ RtlText.set_text not found!");
             return false;
         }
-
-        write_report("✅ IP injected successfully!");
+        
+        void* monoString = create_mono_string(ip.c_str());
+        if (monoString == nullptr) {
+            write_report("❌ Failed to create mono string!");
+            write_log(g_ipResultLog, "❌ Failed to create mono string!");
+            return false;
+        }
+        
+        set_text_rtl(textComponent, monoString);
+        write_report("✅ IP injected via RtlText.set_text");
         write_log(g_ipResultLog, "✅ IP injected: " + ip);
         write_report("========== INJECT COMPLETE ==========\n");
         return true;
@@ -305,7 +223,80 @@ static bool inject_ip_to_ipInput(const std::string& ip) {
     }
 }
 
-// ======================== هوک روی GtaMenuControl.Start (برای گرفتن instance) ========================
+// ======================== دیسیبل کردن دکمه‌ها (به جز LAN و SETTINGS) ========================
+static void disable_menu_buttons_except_lan_settings() {
+    if (g_buttonsDisabled) {
+        write_report("⚠️ Buttons already disabled, skipping...");
+        return;
+    }
+    
+    write_report("\n========== DISABLE MENU BUTTONS ==========");
+    write_report("Time: " + get_time());
+    
+    if (g_gtaInstance == nullptr) {
+        write_report("❌ GtaMenuControl instance is null!");
+        return;
+    }
+    
+    try {
+        // گرفتن آرایه دکمه‌ها
+        void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+        if (menuButtons == nullptr) {
+            write_report("❌ menuButtons is null!");
+            return;
+        }
+        write_report("✅ menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
+        
+        // دکمه‌هایی که باید فعال بمونن (LAN=0, LAN=1, SETTINGS=4)
+        int keepActive[] = {0, 1, 4};
+        int keepCount = 3;
+        
+        // تعداد کل دکمه‌ها (از اسکرین شات 8 تاست)
+        int totalButtons = 8;
+        int disabledCount = 0;
+        
+        for (int i = 0; i < totalButtons; i++) {
+            // چک کن آیا این دکمه باید فعال بمونه؟
+            bool shouldKeep = false;
+            for (int j = 0; j < keepCount; j++) {
+                if (keepActive[j] == i) {
+                    shouldKeep = true;
+                    break;
+                }
+            }
+            
+            if (shouldKeep) {
+                write_report("   🔵 Keeping active button index: " + std::to_string(i));
+                continue;
+            }
+            
+            void* button = menuButtons[i];
+            if (button == nullptr) {
+                write_report("   ⚠️ Button index " + std::to_string(i) + " is null!");
+                continue;
+            }
+            
+            // غیرفعال کردن دکمه (m_Interactable = false)
+            bool* interactable = (bool*)((uintptr_t)button + OFFSET_INTERACTABLE);
+            *interactable = false;
+            disabledCount++;
+            write_report("   ❌ Disabled button index: " + std::to_string(i));
+        }
+        
+        g_buttonsDisabled = true;
+        write_report("✅ Disabled " + std::to_string(disabledCount) + " buttons, kept LAN and SETTINGS active!");
+        write_report("========== DISABLE COMPLETE ==========\n");
+        
+    } catch (const std::exception& e) {
+        write_report("❌ Exception: " + std::string(e.what()));
+        write_log(g_crashLog, "⚠️ Exception: " + std::string(e.what()));
+    } catch (...) {
+        write_report("❌ Unknown exception!");
+        write_log(g_crashLog, "⚠️ Unknown exception!");
+    }
+}
+
+// ======================== هوک روی GtaMenuControl.Start ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     write_report("========== GtaMenuControl.Start() HOOKED ==========");
@@ -320,7 +311,10 @@ void hook_GtaMenuStart(void *instance) {
         // اگر IP ذخیره شده باشه، خودکار تزریق کن
         if (!g_targetIP.empty()) {
             write_report("📌 Auto-injecting saved IP: " + g_targetIP);
-            inject_ip_to_ipInput(g_targetIP);
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                // بعد از تزریق موفق، دکمه‌ها رو دیسیبل کن
+                disable_menu_buttons_except_lan_settings();
+            }
         }
     } else {
         write_report("❌ instance is null!");
@@ -350,7 +344,7 @@ static void* get_gta_instance() {
     return instance;
 }
 
-// ======================== اتصال به سرور با NetworkManager ========================
+// ======================== اتصال به سرور ========================
 static void connect_to_server(JNIEnv* env, jobject obj) {
     write_report("\n========== CONNECT TO SERVER ==========");
     write_report("Time: " + get_time());
@@ -371,7 +365,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
             }
         }
 
-        // 1. پیدا کردن NetworkManager
+        // پیدا کردن NetworkManager
         jclass nmClass = env->FindClass("Mirror.NetworkManager");
         if (nmClass == nullptr) {
             env->ExceptionClear();
@@ -385,7 +379,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         }
         write_report("✅ NetworkManager class found");
 
-        // 2. پیدا کردن instance
+        // پیدا کردن instance
         jclass objClass = env->FindClass("UnityEngine.Object");
         jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
         jobject nm = env->CallStaticObjectMethod(objClass, findObj, nmClass);
@@ -397,14 +391,14 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         }
         write_report("✅ NetworkManager instance found");
 
-        // 3. تغییر networkAddress
+        // تغییر networkAddress
         jfieldID addrField = env->GetFieldID(nmClass, "networkAddress", "Ljava/lang/String;");
         jstring jip = env->NewStringUTF(g_targetIP.c_str());
         env->SetObjectField(nm, addrField, jip);
         env->DeleteLocalRef(jip);
         write_report("✅ networkAddress set to: " + g_targetIP);
 
-        // 4. StartClient
+        // StartClient
         jmethodID startClient = env->GetMethodID(nmClass, "StartClient", "()V");
         if (startClient == nullptr) {
             env->ExceptionClear();
@@ -421,6 +415,9 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         env->CallVoidMethod(nm, startClient);
         write_report("✅ Connect called successfully!");
         write_log(g_ipResultLog, "✅ Connected to: " + g_targetIP);
+        
+        // بعد از اتصال، دکمه‌ها رو دیسیبل کن
+        disable_menu_buttons_except_lan_settings();
 
     } catch (...) {
         write_report("❌ Exception in connect_to_server!");
@@ -468,7 +465,9 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         case 1:
             write_report("🔘 Inject IP button pressed");
             write_log(g_ipResultLog, "🔘 Inject IP button pressed");
-            inject_ip_to_ipInput(g_targetIP);
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                disable_menu_buttons_except_lan_settings();
+            }
             break;
 
         case 2:
@@ -540,7 +539,9 @@ void hack_thread() {
         g_gtaReady = true;
         write_report("✅ Got instance via get_Instance()");
         // تزریق خودکار IP
-        inject_ip_to_ipInput(g_targetIP);
+        if (inject_ip_to_ipInput(g_targetIP)) {
+            disable_menu_buttons_except_lan_settings();
+        }
     }
 
 #if defined(__aarch64__)
