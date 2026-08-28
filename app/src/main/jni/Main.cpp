@@ -107,211 +107,78 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== روش 1: get_Instance ========================
-static void* get_instance_method1() {
-    typedef void* (*get_instance_t)();
-    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance == nullptr) {
-        write_report("   ❌ get_Instance not found!");
-        return nullptr;
-    }
-    void* instance = get_Instance();
-    if (instance != nullptr) {
-        write_report("   ✅ get_Instance: 0x" + std::to_string((uintptr_t)instance));
-    }
-    return instance;
-}
-
-// ======================== روش 2: هوک روی Start ========================
+// ======================== هوک ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr) {
         g_gtaInstance = instance;
-        write_report("   ✅ Hook Start: 0x" + std::to_string((uintptr_t)instance));
+        write_report("✅ Hook captured instance: 0x" + std::to_string((uintptr_t)instance));
     }
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
     }
 }
 
-static void* get_instance_method2() {
-    for (int i = 0; i < 10 && g_gtaInstance == nullptr; i++) {
-        sleep(1);
-    }
-    return g_gtaInstance;
-}
-
-// ======================== روش 3: FindObjectOfType (JNI) ========================
-static void* get_instance_method3(JNIEnv* env) {
-    if (env == nullptr) return nullptr;
-    jclass objClass = env->FindClass("UnityEngine.Object");
-    if (objClass == nullptr) return nullptr;
-    jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
-    if (findObj == nullptr) return nullptr;
-    jclass gtaClass = env->FindClass("GtaMenuControl");
-    if (gtaClass == nullptr) return nullptr;
-    jobject instance = env->CallStaticObjectMethod(objClass, findObj, gtaClass);
-    if (instance != nullptr) {
-        write_report("   ✅ FindObjectOfType: 0x" + std::to_string((uintptr_t)instance));
-        return instance;
-    }
-    return nullptr;
-}
-
-// ======================== روش 4: از طریق Name (Find) ========================
-static void* get_instance_method4(JNIEnv* env) {
-    if (env == nullptr) return nullptr;
-    jclass gameObjClass = env->FindClass("UnityEngine.GameObject");
-    if (gameObjClass == nullptr) return nullptr;
-    jmethodID findMethod = env->GetStaticMethodID(gameObjClass, "Find", "(Ljava/lang/String;)LUnityEngine/GameObject;");
-    if (findMethod == nullptr) return nullptr;
-    jstring name = env->NewStringUTF("GtaMenuControl");
-    jobject go = env->CallStaticObjectMethod(gameObjClass, findMethod, name);
-    env->DeleteLocalRef(name);
-    if (go != nullptr) {
-        jmethodID getComp = env->GetMethodID(gameObjClass, "GetComponent", "(Ljava/lang/Class;)LUnityEngine/Component;");
-        if (getComp != nullptr) {
-            jclass gtaClass = env->FindClass("GtaMenuControl");
-            if (gtaClass != nullptr) {
-                jobject instance = env->CallObjectMethod(go, getComp, gtaClass);
-                if (instance != nullptr) {
-                    write_report("   ✅ GameObject.Find: 0x" + std::to_string((uintptr_t)instance));
-                    return instance;
-                }
-            }
-        }
-    }
-    return nullptr;
-}
-
-// ======================== روش 5: از طریق Resources ========================
-static void* get_instance_method5(JNIEnv* env) {
-    if (env == nullptr) return nullptr;
-    jclass resourcesClass = env->FindClass("UnityEngine.Resources");
-    if (resourcesClass == nullptr) return nullptr;
-    jmethodID findObjOfTypeAll = env->GetStaticMethodID(resourcesClass, "FindObjectsOfTypeAll", "(Ljava/lang/Class;)[LUnityEngine/Object;");
-    if (findObjOfTypeAll == nullptr) return nullptr;
-    jclass gtaClass = env->FindClass("GtaMenuControl");
-    if (gtaClass == nullptr) return nullptr;
-    jobjectArray arr = (jobjectArray)env->CallStaticObjectMethod(resourcesClass, findObjOfTypeAll, gtaClass);
-    if (arr != nullptr && env->GetArrayLength(arr) > 0) {
-        jobject instance = env->GetObjectArrayElement(arr, 0);
-        if (instance != nullptr) {
-            write_report("   ✅ Resources.FindObjectsOfTypeAll: 0x" + std::to_string((uintptr_t)instance));
-            return instance;
-        }
-    }
-    return nullptr;
-}
-
-// ======================== گرفتن instance با همه روش‌ها ========================
-static void* get_gta_instance(JNIEnv* env) {
-    write_report("🔍 Getting GtaMenuControl instance...");
-    
-    void* instance = nullptr;
-    
-    // روش 1: get_Instance
-    write_report("   Method 1: get_Instance()");
-    instance = get_instance_method1();
-    if (instance != nullptr) return instance;
-    
-    // روش 2: هوک
-    write_report("   Method 2: Hook Start()");
-    instance = get_instance_method2();
-    if (instance != nullptr) return instance;
-    
-    // روش 3: FindObjectOfType
-    write_report("   Method 3: FindObjectOfType");
-    instance = get_instance_method3(env);
-    if (instance != nullptr) return instance;
-    
-    // روش 4: GameObject.Find
-    write_report("   Method 4: GameObject.Find");
-    instance = get_instance_method4(env);
-    if (instance != nullptr) return instance;
-    
-    // روش 5: Resources
-    write_report("   Method 5: Resources.FindObjectsOfTypeAll");
-    instance = get_instance_method5(env);
-    if (instance != nullptr) return instance;
-    
-    write_report("❌ All methods failed!");
-    return nullptr;
-}
-
-// ======================== دیسیبل کردن menuButtons ========================
-static void disable_menu_buttons(JNIEnv* env) {
+// ======================== دیسیبل کردن ========================
+static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
-        write_report("⚠️ Already disabled!");
+        write_report("⚠️ Already disabled");
         return;
     }
     
-    write_report("\n========== DISABLE MENU BUTTONS ==========");
+    write_report("\n========== DISABLE ==========");
     write_report("Time: " + get_time());
     
-    for (int attempt = 0; attempt < 5; attempt++) {
-        if (attempt > 0) {
-            write_report("🔄 Retry " + std::to_string(attempt) + "...");
-            sleep(1);
-        }
-        
-        void* instance = get_gta_instance(env);
-        if (instance == nullptr) {
-            write_report("   ⚠️ Instance null, retrying...");
-            continue;
-        }
-        
-        g_gtaInstance = instance;
-        write_report("✅ Instance: 0x" + std::to_string((uintptr_t)instance));
-        
-        // گرفتن آرایه menuButtons
-        void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
-        if (menuButtons == nullptr) {
-            write_report("   ⚠️ menuButtons null, retrying...");
-            continue;
-        }
-        
-        // شمارش دکمه‌ها
-        int count = 0;
-        for (int i = 0; i < 20; i++) {
-            if (menuButtons[i] != nullptr) count++;
-        }
-        write_report("✅ Found " + std::to_string(count) + " buttons");
-        
-        // اگه کمتر از 5 دکمه بود، دوباره تلاش کن
-        if (count < 5) {
-            write_report("   ⚠️ Only " + std::to_string(count) + " buttons, retrying...");
-            continue;
-        }
-        
-        // دیسیبل کردن (به جز LAN=0,1 و SETTINGS=4)
-        int disabled = 0;
-        for (int i = 0; i < 20; i++) {
-            void* btn = menuButtons[i];
-            if (btn == nullptr) continue;
-            
-            // LAN و SETTINGS فعال بمونن
-            if (i == 0 || i == 1 || i == 4) {
-                write_report("   🔵 Keeping: index " + std::to_string(i));
-                continue;
-            }
-            
-            bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
-            if (interactable != nullptr) {
-                *interactable = false;
-                disabled++;
-                write_report("   ❌ Disabled: index " + std::to_string(i));
-            }
-        }
-        
-        g_buttonsDisabled = true;
-        write_report("✅ Disabled " + std::to_string(disabled) + " buttons!");
-        write_result("✅ Disabled " + std::to_string(disabled) + " buttons!");
-        write_report("========== COMPLETE ==========\n");
+    // منتظر بمون تا instance از هوک بیاد
+    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
+        write_report("⏳ Waiting for instance... (" + std::to_string(i+1) + "/15)");
+        sleep(1);
+    }
+    
+    if (g_gtaInstance == nullptr) {
+        write_report("❌ No instance after 15 seconds!");
         return;
     }
     
-    write_report("❌ Failed after 5 attempts!");
+    write_report("✅ Using instance: 0x" + std::to_string((uintptr_t)g_gtaInstance));
+    
+    // گرفتن menuButtons
+    void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+    if (menuButtons == nullptr) {
+        write_report("❌ menuButtons is null!");
+        return;
+    }
+    write_report("✅ menuButtons at: 0x" + std::to_string((uintptr_t)menuButtons));
+    
+    // ====== شمارش و دیسیبل ======
+    int total = 0;
+    int disabled = 0;
+    
+    for (int i = 0; i < 25; i++) {
+        void* btn = menuButtons[i];
+        if (btn == nullptr) continue;
+        
+        total++;
+        write_report("   Found button " + std::to_string(i) + ": 0x" + std::to_string((uintptr_t)btn));
+        
+        // LAN (0,1) و SETTINGS (4) فعال بمونن
+        if (i == 0 || i == 1 || i == 4) {
+            write_report("      🔵 Keeping: " + std::to_string(i));
+            continue;
+        }
+        
+        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
+        if (interactable != nullptr) {
+            *interactable = false;
+            disabled++;
+            write_report("      ❌ Disabled: " + std::to_string(i));
+        }
+    }
+    
+    g_buttonsDisabled = true;
+    write_report("✅ Total: " + std::to_string(total) + " buttons");
+    write_report("✅ Disabled: " + std::to_string(disabled) + " buttons");
+    write_report("========== DONE ==========\n");
 }
 
 // ======================== منو ========================
@@ -319,12 +186,11 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_🔧 Tools"),
-        OBFUSCATE("Button_Disable Menu Buttons"),
-        OBFUSCATE("Button_Enable Menu Buttons"),
+        OBFUSCATE("Button_Disable"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
-    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
+    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass("java/lang/String"), env->NewStringUTF(""));
     for (int i = 0; i < total; i++) {
         env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
     }
@@ -339,22 +205,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         case 0:
             write_report("🔘 Disable button pressed");
             g_buttonsDisabled = false;
-            disable_menu_buttons(env);
-            break;
-        case 1:
-            write_report("🔘 Enable button pressed");
-            if (g_gtaInstance != nullptr) {
-                void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
-                if (menuButtons != nullptr) {
-                    for (int i = 0; i < 20; i++) {
-                        if (menuButtons[i] == nullptr) continue;
-                        bool* interactable = (bool*)((uintptr_t)menuButtons[i] + OFFSET_INTERACTABLE);
-                        if (interactable != nullptr) *interactable = true;
-                    }
-                    g_buttonsDisabled = false;
-                    write_report("✅ All buttons enabled!");
-                }
-            }
+            disable_menu_buttons();
             break;
         default:
             break;
@@ -364,10 +215,9 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 // ======================== ترد اصلی ========================
 void hack_thread() {
     while (!isLibraryLoaded(targetLibName)) sleep(1);
-    write_report("✅ libil2cpp.so loaded");
+    write_report("✅ lib loaded");
     
 #if defined(__aarch64__)
-    // هوک Start
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr) {
         DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
@@ -375,7 +225,11 @@ void hack_thread() {
     }
 #endif
     
-    write_report("✅ hack_thread done");
+    // بعد از نصب هوک، صبر کن و دیسیبل کن
+    sleep(3);
+    disable_menu_buttons();
+    
+    write_report("✅ hack done");
 }
 
 // ======================== تابع ورودی ========================
