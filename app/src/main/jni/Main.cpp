@@ -129,24 +129,50 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== تبدیل MonoString به std::string ========================
+// ======================== تبدیل MonoString به std::string (با توابع IL2CPP) ========================
 static std::string mono_string_to_utf8(void* monoString) {
     if (monoString == nullptr) return "";
     if (!is_valid_address(monoString)) return "";
     
-    typedef const char* (*il2cpp_string_to_utf8_t)(void*);
-    il2cpp_string_to_utf8_t il2cpp_string_to_utf8 = 
-        (il2cpp_string_to_utf8_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_to_utf8");
+    // ====== il2cpp_string_length ======
+    typedef int32_t (*il2cpp_string_length_t)(void* str);
+    il2cpp_string_length_t il2cpp_string_length = 
+        (il2cpp_string_length_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
     
-    if (il2cpp_string_to_utf8 == nullptr) {
-        write_report("   ❌ il2cpp_string_to_utf8 not found!");
+    if (il2cpp_string_length == nullptr) {
+        write_report("   ❌ il2cpp_string_length not found!");
         return "";
     }
     
-    const char* utf8 = il2cpp_string_to_utf8(monoString);
-    if (utf8 == nullptr) return "";
+    int length = il2cpp_string_length(monoString);
+    if (length <= 0 || length > 65536) {
+        write_report("   ❌ Invalid string length: " + std::to_string(length));
+        return "";
+    }
     
-    return std::string(utf8);
+    // ====== il2cpp_string_chars ======
+    typedef uint16_t* (*il2cpp_string_chars_t)(void* str);
+    il2cpp_string_chars_t il2cpp_string_chars = 
+        (il2cpp_string_chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
+    
+    if (il2cpp_string_chars == nullptr) {
+        write_report("   ❌ il2cpp_string_chars not found!");
+        return "";
+    }
+    
+    uint16_t* chars = il2cpp_string_chars(monoString);
+    if (chars == nullptr || !is_valid_address(chars)) {
+        write_report("   ❌ Cannot read string chars!");
+        return "";
+    }
+    
+    std::string result;
+    result.reserve(length);
+    for (int i = 0; i < length; i++) {
+        result += (char)(chars[i] & 0xFF);
+    }
+    
+    return result;
 }
 
 // ======================== گرفتن GtaMenuControl instance ========================
