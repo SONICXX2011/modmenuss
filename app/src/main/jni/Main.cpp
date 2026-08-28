@@ -20,33 +20,23 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (همه از دامپ) ========================
-#define OFFSET_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
+// ======================== آفست‌ها ========================
 #define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
 #define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
 
-// ======================== IP پیش‌فرض ========================
-#define DEFAULT_IP "5.57.37.224"
-#define DEFAULT_PORT "9876"
-
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
-static std::string g_lastIPFile = g_basePath + "last_ip.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_reportLog = g_basePath + "full_report.txt";
 
 // ======================== متغیرها ========================
-static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_gtaReady = false;
 static bool g_buttonsDisabled = false;
-
-// ======================== اعلان اولیه توابع ========================
-static void disable_menu_buttons();
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -78,27 +68,7 @@ static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
 
-static void save_ip(const std::string& ip) {
-    std::ofstream f(g_lastIPFile);
-    if (f.is_open()) {
-        f << ip << "\n";
-        f.close();
-        write_report("📝 IP saved: " + ip);
-    }
-}
-
-static std::string load_ip() {
-    std::ifstream f(g_lastIPFile);
-    if (f.is_open()) {
-        std::string ip;
-        std::getline(f, ip);
-        f.close();
-        return ip;
-    }
-    return "";
-}
-
-// ======================== کرش‌گیر کامل ========================
+// ======================== کرش‌گیر ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -135,7 +105,7 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== دیسیبل کردن دکمه‌ها (داینامیک و امن) ========================
+// ======================== دیسیبل کردن دکمه‌ها ========================
 static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
         write_report("⚠️ Buttons already disabled, skipping...");
@@ -152,7 +122,6 @@ static void disable_menu_buttons() {
     }
     
     try {
-        // گرفتن آرایه دکمه‌ها
         void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
         if (menuButtons == nullptr) {
             write_report("❌ menuButtons is null!");
@@ -161,27 +130,18 @@ static void disable_menu_buttons() {
         }
         write_report("✅ menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
         
-        // ====== شمارش داینامیک تعداد دکمه‌ها (حداکثر 20) ======
         int totalButtons = 0;
         while (totalButtons < 20 && menuButtons[totalButtons] != nullptr) {
             totalButtons++;
         }
         write_report("✅ Total buttons found: " + std::to_string(totalButtons));
         
-        if (totalButtons == 0) {
-            write_report("⚠️ No buttons found in array!");
-            return;
-        }
-        
-        // دکمه‌هایی که باید فعال بمونن (LAN=0, LAN=1, SETTINGS=4)
         int keepActive[] = {0, 1, 4};
-        int keepCount = 3;
         int disabledCount = 0;
         
         for (int i = 0; i < totalButtons; i++) {
-            // چک کن آیا این دکمه باید فعال بمونه؟
             bool shouldKeep = false;
-            for (int j = 0; j < keepCount; j++) {
+            for (int j = 0; j < 3; j++) {
                 if (keepActive[j] == i) {
                     shouldKeep = true;
                     break;
@@ -194,24 +154,18 @@ static void disable_menu_buttons() {
             }
             
             void* button = menuButtons[i];
-            if (button == nullptr) {
-                write_report("   ⚠️ Button index " + std::to_string(i) + " is null, skipping!");
-                continue;
-            }
+            if (button == nullptr) continue;
             
-            // غیرفعال کردن دکمه (m_Interactable = false)
             bool* interactable = (bool*)((uintptr_t)button + OFFSET_INTERACTABLE);
             if (interactable != nullptr) {
                 *interactable = false;
                 disabledCount++;
                 write_report("   ❌ Disabled button index: " + std::to_string(i));
-            } else {
-                write_report("   ⚠️ interactable pointer is null for index " + std::to_string(i));
             }
         }
         
         g_buttonsDisabled = true;
-        write_report("✅ " + std::to_string(disabledCount) + " buttons disabled! LAN and SETTINGS kept active!");
+        write_report("✅ " + std::to_string(disabledCount) + " buttons disabled!");
         write_log(g_ipResultLog, "✅ " + std::to_string(disabledCount) + " buttons disabled!");
         write_report("========== DISABLE COMPLETE ==========\n");
         
@@ -224,7 +178,7 @@ static void disable_menu_buttons() {
     }
 }
 
-// ======================== هوک روی GtaMenuControl.Start ========================
+// ======================== هوک ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     write_report("========== GtaMenuControl.Start() HOOKED ==========");
@@ -235,8 +189,6 @@ void hook_GtaMenuStart(void *instance) {
         g_gtaReady = true;
         write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
         write_debug("✅ GtaMenuControl instance saved");
-        
-        // بعد از گرفتن instance، دکمه‌ها رو دیسیبل کن
         disable_menu_buttons();
     } else {
         write_report("❌ instance is null!");
@@ -248,7 +200,7 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
-// ======================== گرفتن instance با get_Instance ========================
+// ======================== get_Instance ========================
 static void* get_gta_instance() {
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
@@ -262,7 +214,6 @@ static void* get_gta_instance() {
     if (instance != nullptr) {
         write_report("✅ GtaMenuControl instance via get_Instance: 0x" + std::to_string((uintptr_t)instance));
     }
-    
     return instance;
 }
 
@@ -271,7 +222,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_🔧 Tools"),
-        OBFUSCATE("Button_Disable Menu Buttons"),  // featNum: 0
+        OBFUSCATE("Button_Disable Menu Buttons"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -287,12 +238,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
     switch (featNum) {
-        case 0:  // دکمه Disable Menu Buttons
+        case 0:
             write_report("🔘 Disable Menu Buttons button pressed");
             write_log(g_ipResultLog, "🔘 Disable Menu Buttons button pressed");
             disable_menu_buttons();
             break;
-
         default:
             write_report("Unknown featNum: " + std::to_string(featNum));
             break;
@@ -320,30 +270,17 @@ void hack_thread() {
     write_report("✅ libil2cpp.so loaded successfully");
     write_debug("✅ libil2cpp.so loaded!");
 
-    // ====== بارگذاری IP ======
-    g_targetIP = load_ip();
-    if (g_targetIP.empty()) {
-        write_report("📌 No saved IP, using default: " DEFAULT_IP ":" DEFAULT_PORT);
-        g_targetIP = DEFAULT_IP ":" DEFAULT_PORT;
-        save_ip(g_targetIP);
-    } else {
-        write_report("📌 Loaded IP from file: " + g_targetIP);
-    }
-    write_debug("📌 Current IP: " + g_targetIP);
-
-    // ====== روش 1: گرفتن instance با get_Instance ======
+    // ====== گرفتن instance ======
     write_report("🔍 Trying get_Instance()...");
     void* instance1 = get_gta_instance();
     if (instance1 != nullptr) {
         g_gtaInstance = instance1;
         g_gtaReady = true;
         write_report("✅ Got instance via get_Instance()");
-        // دیسیبل کردن دکمه‌ها
         disable_menu_buttons();
     }
 
 #if defined(__aarch64__)
-    // ====== روش 2: هوک روی Start ======
     if (!g_gtaReady) {
         write_report("🔍 Trying hook on GtaMenuControl.Start()...");
         void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
