@@ -18,9 +18,6 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ) ========================
-#define OFFSET_NETWORK_ADDR  0x50          // NetworkManager.networkAddress
-
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
@@ -120,7 +117,7 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== اتصال به سرور ========================
+// ======================== اتصال به سرور (با Mirror.NetworkManager) ========================
 static void connect_to_server(JNIEnv* env, jobject obj) {
     write_report("\n========== CONNECT ATTEMPT ==========");
     write_report("Time: " + get_time());
@@ -142,16 +139,30 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
             write_report("📌 IP loaded from file: " + g_targetIP);
         }
 
-        // ====== 1. پیدا کردن NetworkManager ======
-        write_report("Step 1: Finding NetworkManager...");
-        jclass nmClass = env->FindClass("NetworkManager");
+        // ====== 1. پیدا کردن Mirror.NetworkManager ======
+        write_report("Step 1: Finding Mirror.NetworkManager...");
+        
+        const char* classNames[] = {
+            "Mirror.NetworkManager",
+            "NetworkManager"
+        };
+        
+        jclass nmClass = nullptr;
+        for (int i = 0; i < 2 && nmClass == nullptr; i++) {
+            nmClass = env->FindClass(classNames[i]);
+            if (nmClass == nullptr) {
+                env->ExceptionClear();
+                write_report("   ❌ " + std::string(classNames[i]) + " not found");
+            } else {
+                write_report("   ✅ Found: " + std::string(classNames[i]));
+            }
+        }
+
         if (nmClass == nullptr) {
-            env->ExceptionClear();
             write_report("❌ NetworkManager class not found!");
             write_log(g_ipResultLog, "❌ NetworkManager class not found!");
             return;
         }
-        write_report("✅ NetworkManager class found");
 
         jclass objClass = env->FindClass("UnityEngine/Object");
         if (objClass == nullptr) {
