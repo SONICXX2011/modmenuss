@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <vector>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -17,6 +19,16 @@
 #include "dobby.h"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
+
+// ======================== آفست‌ها (از دامپ) ========================
+#define OFFSET_NETWORK_ADDR     0x50          // CustomNetworkManager.networkAddress
+#define OFFSET_START_CLIENT     0x1AACCB4     // CustomNetworkManager.StartClient()
+#define OFFSET_START_HOST       0x1AADC24     // CustomNetworkManager.StartHost()
+#define OFFSET_GTA_MENU_START   0xF571A4      // GtaMenuControl.Start()
+
+// ======================== IP پیش‌فرض ========================
+#define DEFAULT_IP "5.57.37.224"
+#define DEFAULT_PORT "9876"
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -29,6 +41,8 @@ static std::string g_reportLog = g_basePath + "full_report.txt";
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
+static void* g_gtaMenuInstance = nullptr;
+static bool g_gtaMenuReady = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -117,7 +131,28 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== اتصال به سرور (با Mirror.NetworkManager) ========================
+// ======================== هوک ========================
+void (*orig_GtaMenuStart)(void *instance);
+void hook_GtaMenuStart(void *instance) {
+    write_report("========== GtaMenuControl.Start() HOOKED ==========");
+    write_report("Time: " + get_time());
+    
+    if (instance != nullptr) {
+        g_gtaMenuInstance = instance;
+        g_gtaMenuReady = true;
+        write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
+        write_debug("✅ GtaMenuControl instance saved");
+    } else {
+        write_report("❌ instance is null!");
+    }
+    write_report("====================================================\n");
+    
+    if (orig_GtaMenuStart) {
+        orig_GtaMenuStart(instance);
+    }
+}
+
+// ======================== اتصال به سرور ========================
 static void connect_to_server(JNIEnv* env, jobject obj) {
     write_report("\n========== CONNECT ATTEMPT ==========");
     write_report("Time: " + get_time());
@@ -132,18 +167,17 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         if (g_targetIP.empty()) {
             g_targetIP = load_ip();
             if (g_targetIP.empty()) {
-                write_report("❌ No IP found!");
-                write_log(g_ipResultLog, "❌ No IP found!");
-                return;
+                write_report("📌 No IP found, using default: " DEFAULT_IP ":" DEFAULT_PORT);
+                g_targetIP = DEFAULT_IP ":" DEFAULT_PORT;
+                save_ip(g_targetIP);
             }
-            write_report("📌 IP loaded from file: " + g_targetIP);
         }
 
-        // ====== 1. پیدا کردن Mirror.NetworkManager ======
-        write_report("Step 1: Finding Mirror.NetworkManager...");
+        // ====== پیدا کردن NetworkManager ======
+        write_report("Step 1: Finding NetworkManager...");
         
         const char* classNames[] = {
-            "Mirror.NetworkManager",
+            "CustomNetworkManager",
             "NetworkManager"
         };
         
@@ -188,7 +222,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         }
         write_report("✅ NetworkManager instance found: 0x" + std::to_string((uintptr_t)nm));
 
-        // ====== 2. تغییر networkAddress ======
+        // ====== تغییر networkAddress ======
         write_report("Step 2: Setting networkAddress...");
         jfieldID addrField = env->GetFieldID(nmClass, "networkAddress", "Ljava/lang/String;");
         if (addrField == nullptr) {
@@ -210,7 +244,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         write_report("✅ networkAddress set to: " + g_targetIP);
         write_log(g_ipResultLog, "✅ networkAddress set to: " + g_targetIP);
 
-        // ====== 3. صدا زدن StartClient ======
+        // ====== StartClient ======
         write_report("Step 3: Calling StartClient...");
         jmethodID startClient = env->GetMethodID(nmClass, "StartClient", "()V");
         if (startClient == nullptr) {
@@ -261,7 +295,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         OBFUSCATE("InputText_Enter IP"),           // featNum: 0
         OBFUSCATE("Button_Connect"),               // featNum: 1
         OBFUSCATE("Button_Show IP"),               // featNum: 2
-        OBFUSCATE("RichTextView_Output: /sdcard/Download/lac/"),
+        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
     ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
@@ -326,6 +360,7 @@ void hack_thread() {
 
     write_report("⏳ Waiting for libil2cpp.so to load...");
     write_debug("⏳ Waiting for " + std::string(libName) + "...");
+
     while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
         sleep(1);
         waitCount++;
@@ -340,11 +375,34 @@ void hack_thread() {
     write_report("✅ libil2cpp.so loaded successfully");
     write_debug("✅ " + std::string(libName) + " loaded!");
 
-    g_targetIP = load_ip();
-    if (!g_targetIP.empty()) {
-        write_report("📌 Pre-loaded IP from file: " + g_targetIP);
-        write_debug("📌 Loaded IP from file: " + g_targetIP);
+    // ====== هوک روی GtaMenuControl.Start ======
+#if defined(__aarch64__)
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr != nullptr) {
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_report("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
+            write_debug("✅ GtaMenuControl.Start() hooked");
+        } else {
+            write_report("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
+            write_debug("❌ GtaMenuControl.Start() hook failed");
+        }
+    } else {
+        write_report("❌ GtaMenuControl.Start() address not found!");
+        write_debug("❌ GtaMenuControl.Start() address not found");
     }
+#endif
+
+    // ====== IP ======
+    g_targetIP = load_ip();
+    if (g_targetIP.empty()) {
+        write_report("📌 No saved IP found, using default: " DEFAULT_IP ":" DEFAULT_PORT);
+        g_targetIP = DEFAULT_IP ":" DEFAULT_PORT;
+        save_ip(g_targetIP);
+    } else {
+        write_report("📌 Loaded IP from file: " + g_targetIP);
+    }
+    write_debug("📌 Current IP: " + g_targetIP);
 
     write_report("✅ hack_thread finished successfully");
     write_debug("✅ hack_thread finished");
