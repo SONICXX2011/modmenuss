@@ -15,6 +15,7 @@
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
 #include "dobby.h"
+#include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
@@ -23,6 +24,8 @@
 #define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
 #define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
+#define MAX_BUTTONS             30
+#define MAX_RETRIES             5
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -114,10 +117,9 @@ static bool is_valid_address(void* addr) {
     // آدرس‌های خیلی کوچک (مثل 0x8) یا خیلی بزرگ معتبر نیستن
     if (ptr < 0x1000) return false;
     if (ptr > 0x7FFFFFFFFFFFFF) return false;
-    // چک کن که قابل خوندن باشه (با تابع KittyMemory)
+    // چک کن که readable باشه
     auto map = KittyMemory::getAddressMap(addr);
-    if (!map.readable) return false;
-    return true;
+    return map.readable;
 }
 
 // ======================== گرفتن instance با get_Instance ========================
@@ -148,7 +150,7 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
-// ======================== دیسیبل کردن دکمه‌ها ========================
+// ======================== دیسیبل کردن دکمه‌ها (فقط menuButtons) ========================
 static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
         write_report("⚠️ Already disabled, skipping...");
@@ -182,15 +184,6 @@ static void disable_menu_buttons() {
         }
     }
     
-    // تلاش 3: FindObjectOfType (JNI)
-    if (instance == nullptr) {
-        write_report("   Method 3: FindObjectOfType");
-        JNIEnv* env = nullptr;
-        // فرض میکنیم env از قبل موجوده
-        // اینجا نیاز به env داریم که از تابع Changes میاد
-        write_report("   ⚠️ Skipping (needs JNIEnv)");
-    }
-    
     if (instance == nullptr || !is_valid_address(instance)) {
         write_report("❌ Failed to get instance!");
         write_result("❌ Failed to get instance!");
@@ -209,11 +202,15 @@ static void disable_menu_buttons() {
     write_report("✅ menuButtons at: 0x" + std::to_string((uintptr_t)menuButtons));
     
     // ====== مرحله 3: شمارش و دیسیبل کردن ======
+    // دکمه‌هایی که باید فعال بمونن: LAN (0,1) و SETTINGS (4)
+    int keepActive[] = {0, 1, 4};
+    int keepCount = 3;
+    
     int totalButtons = 0;
     int disabledCount = 0;
     int invalidCount = 0;
     
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < MAX_BUTTONS; i++) {
         void* btn = menuButtons[i];
         
         // اگه آدرس معتبر نباشه، رد کن
@@ -224,9 +221,17 @@ static void disable_menu_buttons() {
         
         totalButtons++;
         
-        // LAN (0,1) و SETTINGS (4) فعال بمونن
-        if (i == 0 || i == 1 || i == 4) {
-            write_report("   🔵 Keeping active: index " + std::to_string(i) + " (0x" + std::to_string((uintptr_t)btn) + ")");
+        // چک کن آیا این دکمه باید فعال بمونه؟
+        bool shouldKeep = false;
+        for (int j = 0; j < keepCount; j++) {
+            if (keepActive[j] == i) {
+                shouldKeep = true;
+                break;
+            }
+        }
+        
+        if (shouldKeep) {
+            write_report("   🔵 Keeping active: index " + std::to_string(i));
             continue;
         }
         
@@ -235,9 +240,9 @@ static void disable_menu_buttons() {
         if (interactable != nullptr && is_valid_address(interactable)) {
             *interactable = false;
             disabledCount++;
-            write_report("   ❌ Disabled: index " + std::to_string(i) + " (0x" + std::to_string((uintptr_t)btn) + ")");
+            write_report("   ❌ Disabled: index " + std::to_string(i));
         } else {
-            write_report("   ⚠️ Cannot disable index " + std::to_string(i) + " (interactable invalid)");
+            write_report("   ⚠️ Cannot disable index " + std::to_string(i));
         }
     }
     
@@ -245,8 +250,41 @@ static void disable_menu_buttons() {
     write_report("✅ Total buttons found: " + std::to_string(totalButtons));
     write_report("✅ Disabled buttons: " + std::to_string(disabledCount));
     write_report("✅ Invalid addresses skipped: " + std::to_string(invalidCount));
+    write_report("✅ Kept active: LAN (0,1) and SETTINGS (4)");
     write_result("✅ Disabled " + std::to_string(disabledCount) + " buttons (LAN & SETTINGS kept active)");
     write_report("========== DISABLE COMPLETE ==========\n");
+}
+
+// ======================== فعال کردن دوباره دکمه‌ها ========================
+static void enable_menu_buttons() {
+    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
+        write_report("❌ No valid instance to enable buttons!");
+        write_result("❌ No valid instance!");
+        return;
+    }
+    
+    void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+    if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
+        write_report("❌ menuButtons invalid!");
+        write_result("❌ menuButtons invalid!");
+        return;
+    }
+    
+    int enabledCount = 0;
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        void* btn = menuButtons[i];
+        if (!is_valid_address(btn)) continue;
+        
+        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
+        if (interactable != nullptr && is_valid_address(interactable)) {
+            *interactable = true;
+            enabledCount++;
+        }
+    }
+    
+    g_buttonsDisabled = false;
+    write_report("✅ Enabled " + std::to_string(enabledCount) + " buttons");
+    write_result("✅ Enabled " + std::to_string(enabledCount) + " buttons");
 }
 
 // ======================== منو ========================
@@ -281,26 +319,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         case 1:
             write_report("🔘 Enable button pressed");
             write_result("🔘 Enable button pressed");
-            if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
-                void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
-                if (menuButtons != nullptr && is_valid_address(menuButtons)) {
-                    int enabled = 0;
-                    for (int i = 0; i < 30; i++) {
-                        void* btn = menuButtons[i];
-                        if (!is_valid_address(btn)) continue;
-                        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
-                        if (interactable != nullptr && is_valid_address(interactable)) {
-                            *interactable = true;
-                            enabled++;
-                        }
-                    }
-                    g_buttonsDisabled = false;
-                    write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
-                    write_result("✅ Enabled " + std::to_string(enabled) + " buttons");
-                }
-            } else {
-                write_report("❌ No valid instance to enable buttons");
-            }
+            enable_menu_buttons();
             break;
             
         default:
@@ -348,7 +367,8 @@ void hack_thread() {
     }
 #endif
 
-    // ====== تلاش اولیه برای دیسیبل کردن ======
+    // ====== تلاش اولیه برای دیسیبل کردن (بعد از 3 ثانیه) ======
+    sleep(3);
     disable_menu_buttons();
 
     write_report("✅ hack_thread finished successfully");
