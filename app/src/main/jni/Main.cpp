@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <vector>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -18,11 +20,11 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
-#define OFFSET_GET_INSTANCE     0xF570C4
-#define OFFSET_GTA_START        0xF571A4
-#define OFFSET_MENU_BUTTONS     0x30
-#define OFFSET_INTERACTABLE     0xD8
+// ======================== آفست‌ها (همه از دامپ) ========================
+#define OFFSET_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
+#define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
+#define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
 
 // ======================== IP پیش‌فرض ========================
 #define DEFAULT_IP "5.57.37.224"
@@ -42,6 +44,9 @@ static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_gtaReady = false;
 static bool g_buttonsDisabled = false;
+
+// ======================== اعلان اولیه توابع ========================
+static void disable_menu_buttons();
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -93,7 +98,7 @@ static std::string load_ip() {
     return "";
 }
 
-// ======================== کرش‌گیر ========================
+// ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -130,7 +135,7 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== دیسیبل کردن دکمه‌ها (به جز LAN و SETTINGS) ========================
+// ======================== دیسیبل کردن دکمه‌ها (داینامیک و امن) ========================
 static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
         write_report("⚠️ Buttons already disabled, skipping...");
@@ -156,15 +161,27 @@ static void disable_menu_buttons() {
         }
         write_report("✅ menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
         
+        // ====== شمارش داینامیک تعداد دکمه‌ها (حداکثر 20) ======
+        int totalButtons = 0;
+        while (totalButtons < 20 && menuButtons[totalButtons] != nullptr) {
+            totalButtons++;
+        }
+        write_report("✅ Total buttons found: " + std::to_string(totalButtons));
+        
+        if (totalButtons == 0) {
+            write_report("⚠️ No buttons found in array!");
+            return;
+        }
+        
         // دکمه‌هایی که باید فعال بمونن (LAN=0, LAN=1, SETTINGS=4)
         int keepActive[] = {0, 1, 4};
-        int totalButtons = 8;
+        int keepCount = 3;
         int disabledCount = 0;
         
         for (int i = 0; i < totalButtons; i++) {
             // چک کن آیا این دکمه باید فعال بمونه؟
             bool shouldKeep = false;
-            for (int j = 0; j < 3; j++) {
+            for (int j = 0; j < keepCount; j++) {
                 if (keepActive[j] == i) {
                     shouldKeep = true;
                     break;
@@ -178,15 +195,19 @@ static void disable_menu_buttons() {
             
             void* button = menuButtons[i];
             if (button == nullptr) {
-                write_report("   ⚠️ Button index " + std::to_string(i) + " is null!");
+                write_report("   ⚠️ Button index " + std::to_string(i) + " is null, skipping!");
                 continue;
             }
             
             // غیرفعال کردن دکمه (m_Interactable = false)
             bool* interactable = (bool*)((uintptr_t)button + OFFSET_INTERACTABLE);
-            *interactable = false;
-            disabledCount++;
-            write_report("   ❌ Disabled button index: " + std::to_string(i));
+            if (interactable != nullptr) {
+                *interactable = false;
+                disabledCount++;
+                write_report("   ❌ Disabled button index: " + std::to_string(i));
+            } else {
+                write_report("   ⚠️ interactable pointer is null for index " + std::to_string(i));
+            }
         }
         
         g_buttonsDisabled = true;
