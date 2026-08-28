@@ -223,14 +223,14 @@ static bool inject_ip_to_ipInput(const std::string& ip) {
     }
 }
 
-// ======================== دیسیبل کردن دکمه‌ها (به جز LAN و SETTINGS) ========================
-static void disable_menu_buttons_except_lan_settings() {
+// ======================== دیسیبل کردن دکمه‌ها (NOP کردن) ========================
+static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
         write_report("⚠️ Buttons already disabled, skipping...");
         return;
     }
     
-    write_report("\n========== DISABLE MENU BUTTONS ==========");
+    write_report("\n========== DISABLE MENU BUTTONS (NOP) ==========");
     write_report("Time: " + get_time());
     
     if (g_gtaInstance == nullptr) {
@@ -266,7 +266,7 @@ static void disable_menu_buttons_except_lan_settings() {
             }
             
             if (shouldKeep) {
-                write_report("   🔵 Keeping active button index: " + std::to_string(i));
+                write_report("   🔵 Keeping active: index " + std::to_string(i));
                 continue;
             }
             
@@ -276,15 +276,15 @@ static void disable_menu_buttons_except_lan_settings() {
                 continue;
             }
             
-            // غیرفعال کردن دکمه (m_Interactable = false)
+            // غیرفعال کردن دکمه (m_Interactable = false) = NOP کردن
             bool* interactable = (bool*)((uintptr_t)button + OFFSET_INTERACTABLE);
             *interactable = false;
             disabledCount++;
-            write_report("   ❌ Disabled button index: " + std::to_string(i));
+            write_report("   ❌ Disabled (NOP) button index: " + std::to_string(i));
         }
         
         g_buttonsDisabled = true;
-        write_report("✅ Disabled " + std::to_string(disabledCount) + " buttons, kept LAN and SETTINGS active!");
+        write_report("✅ " + std::to_string(disabledCount) + " buttons disabled (NOP), LAN and SETTINGS kept active!");
         write_report("========== DISABLE COMPLETE ==========\n");
         
     } catch (const std::exception& e) {
@@ -313,7 +313,7 @@ void hook_GtaMenuStart(void *instance) {
             write_report("📌 Auto-injecting saved IP: " + g_targetIP);
             if (inject_ip_to_ipInput(g_targetIP)) {
                 // بعد از تزریق موفق، دکمه‌ها رو دیسیبل کن
-                disable_menu_buttons_except_lan_settings();
+                disable_menu_buttons();
             }
         }
     } else {
@@ -342,6 +342,92 @@ static void* get_gta_instance() {
     }
     
     return instance;
+}
+
+// ======================== منو ========================
+jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
+    jobjectArray ret;
+    const char *features[] = {
+        OBFUSCATE("Category_🌐 Network Tools"),
+        OBFUSCATE("InputText_Enter IP"),           // featNum: 0
+        OBFUSCATE("Button_Inject & Disable"),      // featNum: 1 ← یک دکمه برای همه کارها
+        OBFUSCATE("Button_Connect"),               // featNum: 2
+        OBFUSCATE("Button_Show IP"),               // featNum: 3
+        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
+    };
+    int total = sizeof features / sizeof features[0];
+    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
+    for (int i = 0; i < total; i++) {
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+    }
+    return ret;
+}
+
+// ======================== تغییرات منو ========================
+void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
+             jint value, jlong Lvalue, jboolean boolean, jstring text) {
+
+    const char *textStr = nullptr;
+    if (text != nullptr) {
+        textStr = env->GetStringUTFChars(text, nullptr);
+    }
+
+    switch (featNum) {
+        case 0:
+            if (textStr != nullptr) {
+                g_targetIP = textStr;
+                save_ip(g_targetIP);
+                write_report("📝 IP entered: " + g_targetIP);
+                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
+            }
+            break;
+
+        case 1:  // 🔥 یک دکمه: Inject + Disable
+            write_report("🔘 Inject & Disable button pressed");
+            write_log(g_ipResultLog, "🔘 Inject & Disable button pressed");
+            
+            // اول IP رو تزریق کن
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                // بعد دکمه‌ها رو دیسیبل کن (NOP)
+                disable_menu_buttons();
+            }
+            break;
+
+        case 2:
+            write_report("🔘 Connect button pressed");
+            write_log(g_ipResultLog, "🔘 Connect button pressed");
+            
+            // اول IP رو تزریق کن
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                // بعد دکمه‌ها رو دیسیبل کن (NOP)
+                disable_menu_buttons();
+            }
+            
+            // بعدش Connect رو صدا بزن
+            connect_to_server(env, obj);
+            break;
+
+        case 3:
+            {
+                std::string savedIP = load_ip();
+                if (!savedIP.empty()) {
+                    write_report("📌 Show IP: " + savedIP);
+                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
+                } else {
+                    write_report("❌ No saved IP!");
+                    write_log(g_ipResultLog, "❌ No saved IP!");
+                }
+            }
+            break;
+
+        default:
+            write_report("Unknown featNum: " + std::to_string(featNum));
+            break;
+    }
+
+    if (textStr != nullptr) {
+        env->ReleaseStringUTFChars(text, textStr);
+    }
 }
 
 // ======================== اتصال به سرور ========================
@@ -416,86 +502,11 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         write_report("✅ Connect called successfully!");
         write_log(g_ipResultLog, "✅ Connected to: " + g_targetIP);
         
-        // بعد از اتصال، دکمه‌ها رو دیسیبل کن
-        disable_menu_buttons_except_lan_settings();
+        // بعد از اتصال، دکمه‌ها رو دیسیبل کن (اگه هنوز نشده)
+        disable_menu_buttons();
 
     } catch (...) {
         write_report("❌ Exception in connect_to_server!");
-    }
-}
-
-// ======================== منو ========================
-jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    jobjectArray ret;
-    const char *features[] = {
-        OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Inject IP to UI"),       // featNum: 1
-        OBFUSCATE("Button_Connect to Server"),     // featNum: 2
-        OBFUSCATE("Button_Show IP"),               // featNum: 3
-        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
-    };
-    int total = sizeof features / sizeof features[0];
-    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
-    for (int i = 0; i < total; i++) {
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
-    }
-    return ret;
-}
-
-// ======================== تغییرات منو ========================
-void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
-             jint value, jlong Lvalue, jboolean boolean, jstring text) {
-
-    const char *textStr = nullptr;
-    if (text != nullptr) {
-        textStr = env->GetStringUTFChars(text, nullptr);
-    }
-
-    switch (featNum) {
-        case 0:
-            if (textStr != nullptr) {
-                g_targetIP = textStr;
-                save_ip(g_targetIP);
-                write_report("📝 IP entered: " + g_targetIP);
-                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
-            }
-            break;
-
-        case 1:
-            write_report("🔘 Inject IP button pressed");
-            write_log(g_ipResultLog, "🔘 Inject IP button pressed");
-            if (inject_ip_to_ipInput(g_targetIP)) {
-                disable_menu_buttons_except_lan_settings();
-            }
-            break;
-
-        case 2:
-            write_report("🔘 Connect button pressed");
-            write_log(g_ipResultLog, "🔘 Connect button pressed");
-            connect_to_server(env, obj);
-            break;
-
-        case 3:
-            {
-                std::string savedIP = load_ip();
-                if (!savedIP.empty()) {
-                    write_report("📌 Show IP: " + savedIP);
-                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
-                } else {
-                    write_report("❌ No saved IP!");
-                    write_log(g_ipResultLog, "❌ No saved IP!");
-                }
-            }
-            break;
-
-        default:
-            write_report("Unknown featNum: " + std::to_string(featNum));
-            break;
-    }
-
-    if (textStr != nullptr) {
-        env->ReleaseStringUTFChars(text, textStr);
     }
 }
 
@@ -538,9 +549,9 @@ void hack_thread() {
         g_gtaInstance = instance1;
         g_gtaReady = true;
         write_report("✅ Got instance via get_Instance()");
-        // تزریق خودکار IP
+        // تزریق خودکار IP و دیسیبل کردن
         if (inject_ip_to_ipInput(g_targetIP)) {
-            disable_menu_buttons_except_lan_settings();
+            disable_menu_buttons();
         }
     }
 
