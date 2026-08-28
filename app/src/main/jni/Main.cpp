@@ -49,6 +49,10 @@ static void* g_gtaInstance = nullptr;
 static bool g_gtaReady = false;
 static bool g_buttonsDisabled = false;
 
+// ======================== اعلان اولیه توابع (FORWARD DECLARATIONS) ========================
+static void connect_to_server(JNIEnv* env, jobject obj);
+static void disable_menu_buttons();
+
 // ======================== توابع کمکی ========================
 static std::string get_time() {
     auto now = std::chrono::system_clock::now();
@@ -308,11 +312,9 @@ void hook_GtaMenuStart(void *instance) {
         write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
         write_debug("✅ GtaMenuControl instance saved");
         
-        // اگر IP ذخیره شده باشه، خودکار تزریق کن
         if (!g_targetIP.empty()) {
             write_report("📌 Auto-injecting saved IP: " + g_targetIP);
             if (inject_ip_to_ipInput(g_targetIP)) {
-                // بعد از تزریق موفق، دکمه‌ها رو دیسیبل کن
                 disable_menu_buttons();
             }
         }
@@ -342,92 +344,6 @@ static void* get_gta_instance() {
     }
     
     return instance;
-}
-
-// ======================== منو ========================
-jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    jobjectArray ret;
-    const char *features[] = {
-        OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP"),           // featNum: 0
-        OBFUSCATE("Button_Inject & Disable"),      // featNum: 1 ← یک دکمه برای همه کارها
-        OBFUSCATE("Button_Connect"),               // featNum: 2
-        OBFUSCATE("Button_Show IP"),               // featNum: 3
-        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
-    };
-    int total = sizeof features / sizeof features[0];
-    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
-    for (int i = 0; i < total; i++) {
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
-    }
-    return ret;
-}
-
-// ======================== تغییرات منو ========================
-void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
-             jint value, jlong Lvalue, jboolean boolean, jstring text) {
-
-    const char *textStr = nullptr;
-    if (text != nullptr) {
-        textStr = env->GetStringUTFChars(text, nullptr);
-    }
-
-    switch (featNum) {
-        case 0:
-            if (textStr != nullptr) {
-                g_targetIP = textStr;
-                save_ip(g_targetIP);
-                write_report("📝 IP entered: " + g_targetIP);
-                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
-            }
-            break;
-
-        case 1:  // 🔥 یک دکمه: Inject + Disable
-            write_report("🔘 Inject & Disable button pressed");
-            write_log(g_ipResultLog, "🔘 Inject & Disable button pressed");
-            
-            // اول IP رو تزریق کن
-            if (inject_ip_to_ipInput(g_targetIP)) {
-                // بعد دکمه‌ها رو دیسیبل کن (NOP)
-                disable_menu_buttons();
-            }
-            break;
-
-        case 2:
-            write_report("🔘 Connect button pressed");
-            write_log(g_ipResultLog, "🔘 Connect button pressed");
-            
-            // اول IP رو تزریق کن
-            if (inject_ip_to_ipInput(g_targetIP)) {
-                // بعد دکمه‌ها رو دیسیبل کن (NOP)
-                disable_menu_buttons();
-            }
-            
-            // بعدش Connect رو صدا بزن
-            connect_to_server(env, obj);
-            break;
-
-        case 3:
-            {
-                std::string savedIP = load_ip();
-                if (!savedIP.empty()) {
-                    write_report("📌 Show IP: " + savedIP);
-                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
-                } else {
-                    write_report("❌ No saved IP!");
-                    write_log(g_ipResultLog, "❌ No saved IP!");
-                }
-            }
-            break;
-
-        default:
-            write_report("Unknown featNum: " + std::to_string(featNum));
-            break;
-    }
-
-    if (textStr != nullptr) {
-        env->ReleaseStringUTFChars(text, textStr);
-    }
 }
 
 // ======================== اتصال به سرور ========================
@@ -502,11 +418,88 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         write_report("✅ Connect called successfully!");
         write_log(g_ipResultLog, "✅ Connected to: " + g_targetIP);
         
-        // بعد از اتصال، دکمه‌ها رو دیسیبل کن (اگه هنوز نشده)
         disable_menu_buttons();
 
     } catch (...) {
         write_report("❌ Exception in connect_to_server!");
+    }
+}
+
+// ======================== منو ========================
+jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
+    jobjectArray ret;
+    const char *features[] = {
+        OBFUSCATE("Category_🌐 Network Tools"),
+        OBFUSCATE("InputText_Enter IP"),           // featNum: 0
+        OBFUSCATE("Button_Inject & Disable"),      // featNum: 1
+        OBFUSCATE("Button_Connect"),               // featNum: 2
+        OBFUSCATE("Button_Show IP"),               // featNum: 3
+        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
+    };
+    int total = sizeof features / sizeof features[0];
+    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
+    for (int i = 0; i < total; i++) {
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+    }
+    return ret;
+}
+
+// ======================== تغییرات منو ========================
+void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
+             jint value, jlong Lvalue, jboolean boolean, jstring text) {
+
+    const char *textStr = nullptr;
+    if (text != nullptr) {
+        textStr = env->GetStringUTFChars(text, nullptr);
+    }
+
+    switch (featNum) {
+        case 0:
+            if (textStr != nullptr) {
+                g_targetIP = textStr;
+                save_ip(g_targetIP);
+                write_report("📝 IP entered: " + g_targetIP);
+                write_log(g_ipResultLog, "📝 IP entered: " + g_targetIP);
+            }
+            break;
+
+        case 1:
+            write_report("🔘 Inject & Disable button pressed");
+            write_log(g_ipResultLog, "🔘 Inject & Disable button pressed");
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                disable_menu_buttons();
+            }
+            break;
+
+        case 2:
+            write_report("🔘 Connect button pressed");
+            write_log(g_ipResultLog, "🔘 Connect button pressed");
+            if (inject_ip_to_ipInput(g_targetIP)) {
+                disable_menu_buttons();
+            }
+            connect_to_server(env, obj);
+            break;
+
+        case 3:
+            {
+                std::string savedIP = load_ip();
+                if (!savedIP.empty()) {
+                    write_report("📌 Show IP: " + savedIP);
+                    write_log(g_ipResultLog, "📌 Show IP: " + savedIP);
+                } else {
+                    write_report("❌ No saved IP!");
+                    write_log(g_ipResultLog, "❌ No saved IP!");
+                }
+            }
+            break;
+
+        default:
+            write_report("Unknown featNum: " + std::to_string(featNum));
+            break;
+    }
+
+    if (textStr != nullptr) {
+        env->ReleaseStringUTFChars(text, textStr);
     }
 }
 
@@ -531,7 +524,6 @@ void hack_thread() {
     write_report("✅ libil2cpp.so loaded successfully");
     write_debug("✅ libil2cpp.so loaded!");
 
-    // ====== بارگذاری IP ======
     g_targetIP = load_ip();
     if (g_targetIP.empty()) {
         write_report("📌 No saved IP, using default: " DEFAULT_IP ":" DEFAULT_PORT);
@@ -542,21 +534,18 @@ void hack_thread() {
     }
     write_debug("📌 Current IP: " + g_targetIP);
 
-    // ====== روش 1: گرفتن instance با get_Instance ======
     write_report("🔍 Trying get_Instance()...");
     void* instance1 = get_gta_instance();
     if (instance1 != nullptr) {
         g_gtaInstance = instance1;
         g_gtaReady = true;
         write_report("✅ Got instance via get_Instance()");
-        // تزریق خودکار IP و دیسیبل کردن
         if (inject_ip_to_ipInput(g_targetIP)) {
             disable_menu_buttons();
         }
     }
 
 #if defined(__aarch64__)
-    // ====== روش 2: هوک روی Start (اگه get_Instance کار نکرد) ======
     if (!g_gtaReady) {
         write_report("🔍 Trying hook on GtaMenuControl.Start()...");
         void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
