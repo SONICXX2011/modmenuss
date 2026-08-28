@@ -43,7 +43,7 @@ static bool g_crashHandlerInstalled = false;
 static bool g_buttonsDisabled = false;
 static void* g_gtaInstance = nullptr;
 
-// ======================== لیست ایندکس‌های دیسیبل (0 تا 29) ========================
+// ======================== لیست ایندکس‌های دیسیبل ========================
 static bool g_disableState[MAX_BUTTONS] = {false};
 
 // ======================== توابع کمکی ========================
@@ -124,7 +124,6 @@ static bool is_valid_address(void* addr) {
 
 // ======================== گرفتن instance ========================
 static void* get_gta_instance() {
-    // روش 1: get_Instance
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
     if (get_Instance != nullptr) {
@@ -134,7 +133,6 @@ static void* get_gta_instance() {
         }
     }
     
-    // روش 2: منتظر هوک
     for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
         sleep(1);
     }
@@ -180,19 +178,16 @@ static void disable_single_index(int index) {
         return;
     }
     
-    // روش 1: m_Interactable
     bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
     if (interactable != nullptr && is_valid_address(interactable)) {
         *interactable = false;
     }
     
-    // روش 2: m_EnableCalled
     bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
     if (enableCalled != nullptr && is_valid_address(enableCalled)) {
         *enableCalled = false;
     }
     
-    // روش 3: m_GroupsAllowInteraction
     bool* groupsAllow = (bool*)((uintptr_t)btn + OFFSET_GROUPS_ALLOW);
     if (groupsAllow != nullptr && is_valid_address(groupsAllow)) {
         *groupsAllow = false;
@@ -304,7 +299,6 @@ static void load_config() {
         write_report("✅ Config loaded");
     } else {
         write_report("⚠️ No config, default: keep 0 and 4 active");
-        // پیش‌فرض: همه به جز 0 و 4 دیسیبل
         for (int i = 0; i < MAX_BUTTONS; i++) {
             if (i != 0 && i != 4) {
                 g_disableState[i] = true;
@@ -313,38 +307,51 @@ static void load_config() {
     }
 }
 
-// ======================== منو ========================
+// ======================== منو (نسخه اصلاح‌شده با تعداد عناصر ثابت) ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     load_config();
     
-    std::vector<std::string> features;
-    features.push_back("Category_🔘 Button Manager (0-29)");
+    // ====== تعداد عناصر منو ======
+    // 1 Category + 30 CheckBox + 1 Category + 3 Button + 1 RichTextView = 36
+    const int totalFeatures = 1 + MAX_BUTTONS + 1 + 3 + 1;
     
-    // 30 تا CheckBox برای ایندکس‌های 0 تا 29
+    jobjectArray ret = (jobjectArray)env->NewObjectArray(
+        totalFeatures,
+        env->FindClass(OBFUSCATE("java/lang/String")),
+        env->NewStringUTF("")
+    );
+    
+    if (ret == nullptr) {
+        write_report("❌ Failed to create jobjectArray!");
+        return nullptr;
+    }
+    
+    int index = 0;
+    
+    // Category
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Manager (0-29)")));
+    
+    // 30 CheckBox
     for (int i = 0; i < MAX_BUTTONS; i++) {
         std::string label = "CheckBox_Index " + std::to_string(i);
         if (g_disableState[i]) {
             label = "True_" + label;
         }
-        features.push_back(label);
+        env->SetObjectArrayElement(ret, index++, env->NewStringUTF(label.c_str()));
     }
     
-    features.push_back("Category_");
-    features.push_back("Button_Apply Selected");
-    features.push_back("Button_Enable All");
-    features.push_back("Button_Extract & Save");
-    features.push_back("RichTextView_📁 /sdcard/Download/lac/");
+    // Category خالی
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Category_")));
     
-    jobjectArray ret = (jobjectArray)env->NewObjectArray(
-        features.size(),
-        env->FindClass("java/lang/String"),
-        env->NewStringUTF("")
-    );
+    // 3 دکمه
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Apply Selected")));
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Enable All")));
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Extract & Save")));
     
-    for (size_t i = 0; i < features.size(); i++) {
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i].c_str()));
-    }
+    // RichTextView
+    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/")));
     
+    write_report("✅ GetFeatureList returned " + std::to_string(totalFeatures) + " features");
     return ret;
 }
 
@@ -392,7 +399,6 @@ void hack_thread() {
     }
 #endif
     
-    // منتظر لودینگ
     for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
         sleep(1);
     }
