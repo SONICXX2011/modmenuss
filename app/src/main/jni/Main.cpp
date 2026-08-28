@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <vector>
 #include <sstream>
-#include <cstdlib>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -22,15 +21,13 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
-#define OFFSET_GET_INSTANCE     0xF570C4
-#define OFFSET_GTA_START        0xF571A4
-#define OFFSET_MENU_BUTTONS     0x30
-#define OFFSET_INTERACTABLE     0xD8
-#define OFFSET_ENABLE_CALLED    0x20
-#define OFFSET_GROUPS_ALLOW     0xE8
-#define MAX_BUTTONS             30
-#define MAX_WAIT                20
+// ======================== آفست‌ها (همه از دامپ) ========================
+#define OFFSET_GET_INSTANCE         0xF570C4      // GtaMenuControl.get_Instance()
+#define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_GTA_CHAR_SELECT      0x40          // GtaMenuControl._charSelect
+#define OFFSET_CHAR_CURRENT         0x38          // GtaCharacterSelect.currentChar
+#define OFFSET_CHAR_USERNAME        0x50          // GtaCharacterSelect.usernameStat
+#define OFFSET_TEXT_M_TEXT          0xE0          // Text.m_Text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -38,15 +35,12 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_reportLog = g_basePath + "full_report.txt";
-static std::string g_configFile = g_basePath + "buttons_config.txt";
-static std::string g_applyLog = g_basePath + "apply_log.txt";
+static std::string g_playerInfoLog = g_basePath + "player_info.txt";
 
+// ======================== متغیرها ========================
 static bool g_crashHandlerInstalled = false;
-static bool g_buttonsDisabled = false;
 static void* g_gtaInstance = nullptr;
-
-// ======================== لیست ایندکس‌های دیسیبل (از InputText) ========================
-static std::vector<int> g_selectedIndices;
+static bool g_gtaReady = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -65,6 +59,11 @@ static void write_log(const std::string& file, const std::string& msg) {
     }
 }
 
+static void write_debug(const std::string& msg) {
+    write_log(g_debugLog, msg);
+    LOGI("[Debug] %s", msg.c_str());
+}
+
 static void write_report(const std::string& msg) {
     write_log(g_reportLog, msg);
 }
@@ -73,15 +72,15 @@ static void write_result(const std::string& msg) {
     write_log(g_ipResultLog, msg);
 }
 
-static void write_apply_log(const std::string& msg) {
-    write_log(g_applyLog, msg);
+static void write_player_info(const std::string& msg) {
+    write_log(g_playerInfoLog, msg);
 }
 
 static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
 
-// ======================== کرش‌گیر ========================
+// ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -95,6 +94,8 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     f << "  pc: 0x" << std::hex << sc->pc << "\n";
     f << "  lr: 0x" << std::hex << sc->regs[30] << "\n";
     f << "  sp: 0x" << std::hex << sc->sp << "\n";
+    f << "  x0: 0x" << std::hex << sc->regs[0] << "\n";
+    f << "  x1: 0x" << std::hex << sc->regs[1] << "\n";
     #endif
     f << "========================================\n\n";
     f.close();
@@ -128,24 +129,171 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== گرفتن instance ========================
-static void* get_gta_instance() {
+// ======================== تبدیل MonoString به std::string ========================
+static std::string mono_string_to_utf8(void* monoString) {
+    if (monoString == nullptr) return "";
+    if (!is_valid_address(monoString)) return "";
+    
+    typedef const char* (*il2cpp_string_to_utf8_t)(void*);
+    il2cpp_string_to_utf8_t il2cpp_string_to_utf8 = 
+        (il2cpp_string_to_utf8_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_to_utf8");
+    
+    if (il2cpp_string_to_utf8 == nullptr) {
+        write_report("   ❌ il2cpp_string_to_utf8 not found!");
+        return "";
+    }
+    
+    const char* utf8 = il2cpp_string_to_utf8(monoString);
+    if (utf8 == nullptr) return "";
+    
+    return std::string(utf8);
+}
+
+// ======================== گرفتن GtaMenuControl instance ========================
+static void* get_gta_menu_instance() {
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance != nullptr) {
-        void* instance = get_Instance();
-        if (instance != nullptr && is_valid_address(instance)) {
-            return instance;
+    
+    if (get_Instance == nullptr) {
+        write_report("❌ GtaMenuControl.get_Instance not found!");
+        return nullptr;
+    }
+    
+    void* instance = get_Instance();
+    if (instance != nullptr && is_valid_address(instance)) {
+        write_report("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
+        return instance;
+    }
+    
+    return nullptr;
+}
+
+// ======================== گرفتن GtaCharacterSelect instance ========================
+static void* get_char_select_instance() {
+    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
+        // تلاش مجدد با get_Instance
+        g_gtaInstance = get_gta_menu_instance();
+        if (g_gtaInstance == nullptr) {
+            write_report("❌ Cannot get GtaMenuControl instance!");
+            return nullptr;
         }
     }
     
-    for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
-        sleep(1);
+    void* charSelect = *(void**)((uintptr_t)g_gtaInstance + OFFSET_GTA_CHAR_SELECT);
+    if (charSelect == nullptr || !is_valid_address(charSelect)) {
+        write_report("❌ GtaCharacterSelect is null!");
+        return nullptr;
     }
-    if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
-        return g_gtaInstance;
+    
+    return charSelect;
+}
+
+// ======================== گرفتن اسم کاربر ========================
+static std::string get_player_username() {
+    void* charSelect = get_char_select_instance();
+    if (charSelect == nullptr) {
+        write_report("❌ Cannot get GtaCharacterSelect instance!");
+        return "";
     }
-    return nullptr;
+    
+    void* usernameStat = *(void**)((uintptr_t)charSelect + OFFSET_CHAR_USERNAME);
+    if (usernameStat == nullptr || !is_valid_address(usernameStat)) {
+        write_report("❌ usernameStat is null!");
+        return "";
+    }
+    
+    void** mTextPtr = (void**)((uintptr_t)usernameStat + OFFSET_TEXT_M_TEXT);
+    if (mTextPtr == nullptr || !is_valid_address(mTextPtr)) {
+        write_report("❌ m_Text pointer is invalid!");
+        return "";
+    }
+    
+    void* monoString = *mTextPtr;
+    if (monoString == nullptr) {
+        write_report("❌ MonoString is null!");
+        return "";
+    }
+    
+    std::string username = mono_string_to_utf8(monoString);
+    write_report("   📝 Username: " + username);
+    return username;
+}
+
+// ======================== گرفتن کاراکتر ID ========================
+static int get_player_character_id() {
+    void* charSelect = get_char_select_instance();
+    if (charSelect == nullptr) {
+        write_report("❌ Cannot get GtaCharacterSelect instance!");
+        return -1;
+    }
+    
+    int* currentCharPtr = (int*)((uintptr_t)charSelect + OFFSET_CHAR_CURRENT);
+    if (currentCharPtr == nullptr || !is_valid_address(currentCharPtr)) {
+        write_report("❌ currentChar pointer is invalid!");
+        return -1;
+    }
+    
+    int charId = *currentCharPtr;
+    write_report("   🎭 Character ID: " + std::to_string(charId));
+    return charId;
+}
+
+// ======================== گرفتن اطلاعات کامل پلیر ========================
+static void get_player_info() {
+    write_report("\n========== GET PLAYER INFO ==========");
+    write_report("Time: " + get_time());
+    write_player_info("\n========== PLAYER INFO ==========");
+    write_player_info("Time: " + get_time());
+    
+    try {
+        // گرفتن instance
+        if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
+            g_gtaInstance = get_gta_menu_instance();
+            if (g_gtaInstance == nullptr) {
+                write_report("❌ Failed to get GtaMenuControl instance!");
+                write_result("❌ Failed to get instance!");
+                return;
+            }
+        }
+        write_report("✅ Using GtaMenuControl instance: 0x" + std::to_string((uintptr_t)g_gtaInstance));
+        
+        // گرفتن اسم
+        std::string username = get_player_username();
+        if (username.empty()) {
+            write_report("⚠️ Username is empty!");
+        }
+        
+        // گرفتن کاراکتر ID
+        int charId = get_player_character_id();
+        if (charId < 0) {
+            write_report("⚠️ Character ID is invalid!");
+        }
+        
+        // ====== نمایش نتیجه ======
+        std::string result = "👤 Username: " + (username.empty() ? "(empty)" : username) + 
+                            " | 🎭 Character ID: " + (charId < 0 ? "(unknown)" : std::to_string(charId));
+        
+        write_report("✅ " + result);
+        write_report("========== DONE ==========\n");
+        
+        // ذخیره در فایل مخصوص
+        write_player_info("✅ " + result);
+        write_player_info("========== DONE ==========\n");
+        write_result("✅ " + result);
+        
+        // نمایش با Toast (از طریق JNI)
+        std::string toastMsg = "Username: " + username + "\nCharacter ID: " + std::to_string(charId);
+        
+        // از تابع Toast در Jni.hpp استفاده میکنیم
+        // اینجا باید env داشته باشیم، ولی از Changes میاد
+        
+    } catch (const std::exception& e) {
+        write_report("❌ Exception: " + std::string(e.what()));
+        write_log(g_crashLog, "⚠️ Exception: " + std::string(e.what()));
+    } catch (...) {
+        write_report("❌ Unknown exception!");
+        write_log(g_crashLog, "⚠️ Unknown exception!");
+    }
 }
 
 // ======================== هوک ========================
@@ -153,229 +301,38 @@ void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        write_report("✅ Hook captured");
+        g_gtaReady = true;
+        write_report("✅ Hook captured GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
+        write_debug("✅ GtaMenuControl instance saved");
     }
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
     }
 }
 
-// ======================== parse کردن ایندکس‌های وارد شده ========================
-static std::vector<int> parse_indices(const std::string& input) {
-    std::vector<int> result;
-    std::stringstream ss(input);
-    std::string token;
-    
-    while (std::getline(ss, token, ',')) {
-        // حذف فاصله‌های اضافی
-        token.erase(0, token.find_first_not_of(" \t\n\r"));
-        token.erase(token.find_last_not_of(" \t\n\r") + 1);
-        
-        if (token.empty()) continue;
-        
-        char* endptr;
-        long val = strtol(token.c_str(), &endptr, 10);
-        if (*endptr == '\0' && val >= 0 && val < MAX_BUTTONS) {
-            result.push_back((int)val);
-        } else {
-            write_report("   ⚠️ Invalid index: " + token);
-        }
-    }
-    return result;
-}
-
-// ======================== دیسیبل کردن یک ایندکس ========================
-static bool disable_single_index(int index, bool log_enabled) {
-    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        if (log_enabled) write_report("   ❌ No instance for index " + std::to_string(index));
-        return false;
-    }
-    
-    void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
-    if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        if (log_enabled) write_report("   ❌ menuButtons invalid");
-        return false;
-    }
-    
-    if (index < 0 || index >= MAX_BUTTONS) {
-        if (log_enabled) write_report("   ❌ Index out of range: " + std::to_string(index));
-        return false;
-    }
-    
-    void* btn = menuButtons[index];
-    if (btn == nullptr || !is_valid_address(btn)) {
-        if (log_enabled) write_report("   ❌ Button at index " + std::to_string(index) + " is invalid");
-        return false;
-    }
-    
-    bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
-    if (interactable != nullptr && is_valid_address(interactable)) {
-        *interactable = false;
-    }
-    
-    bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
-    if (enableCalled != nullptr && is_valid_address(enableCalled)) {
-        *enableCalled = false;
-    }
-    
-    bool* groupsAllow = (bool*)((uintptr_t)btn + OFFSET_GROUPS_ALLOW);
-    if (groupsAllow != nullptr && is_valid_address(groupsAllow)) {
-        *groupsAllow = false;
-    }
-    
-    if (log_enabled) {
-        write_report("   ❌ Disabled index " + std::to_string(index));
-        write_apply_log("   Disabled index " + std::to_string(index));
-    }
-    return true;
-}
-
-// ======================== اعمال دیسیبل کردن بر اساس لیست ========================
-static void apply_selected_indices() {
-    if (g_selectedIndices.empty()) {
-        write_report("⚠️ No indices selected to disable!");
-        write_result("⚠️ No indices selected!");
-        return;
-    }
-    
-    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No instance for apply");
-        write_result("❌ No instance");
-        return;
-    }
-    
-    write_report("\n========== APPLY SELECTED INDICES ==========");
-    write_report("Time: " + get_time());
-    write_apply_log("\n========== APPLY LOG ==========");
-    write_apply_log("Time: " + get_time());
-    
-    std::string indicesStr;
-    for (size_t i = 0; i < g_selectedIndices.size(); i++) {
-        if (i > 0) indicesStr += ", ";
-        indicesStr += std::to_string(g_selectedIndices[i]);
-    }
-    write_report("📌 Indices to disable: " + indicesStr);
-    write_apply_log("📌 Indices to disable: " + indicesStr);
-    
-    int successCount = 0;
-    for (int idx : g_selectedIndices) {
-        if (disable_single_index(idx, true)) {
-            successCount++;
-        }
-    }
-    
-    g_buttonsDisabled = true;
-    write_report("✅ Successfully disabled " + std::to_string(successCount) + " of " + std::to_string(g_selectedIndices.size()) + " indices");
-    write_apply_log("✅ Successfully disabled " + std::to_string(successCount) + " of " + std::to_string(g_selectedIndices.size()) + " indices");
-    write_result("✅ Disabled " + std::to_string(successCount) + " indices");
-    write_report("========== DONE ==========\n");
-    write_apply_log("========== DONE ==========\n");
-}
-
-// ======================== فعال کردن همه ========================
-static void enable_all() {
-    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No instance");
-        return;
-    }
-    
-    void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
-    if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        write_report("❌ menuButtons invalid");
-        return;
-    }
-    
-    int enabled = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        void* btn = menuButtons[i];
-        if (btn == nullptr || !is_valid_address(btn)) continue;
-        
-        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
-        if (interactable != nullptr && is_valid_address(interactable)) {
-            *interactable = true;
-            enabled++;
-        }
-        
-        bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
-        if (enableCalled != nullptr && is_valid_address(enableCalled)) {
-            *enableCalled = true;
-        }
-        
-        bool* groupsAllow = (bool*)((uintptr_t)btn + OFFSET_GROUPS_ALLOW);
-        if (groupsAllow != nullptr && is_valid_address(groupsAllow)) {
-            *groupsAllow = true;
-        }
-    }
-    
-    g_selectedIndices.clear();
-    g_buttonsDisabled = false;
-    write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
-    write_result("✅ Enabled all buttons");
-    write_apply_log("✅ Enabled all buttons");
-}
-
-// ======================== ذخیره تنظیمات ========================
-static void save_config() {
-    std::ofstream f(g_configFile);
-    if (f.is_open()) {
-        for (int idx : g_selectedIndices) {
-            f << idx << "\n";
-        }
-        f.close();
-        write_report("✅ Config saved (" + std::to_string(g_selectedIndices.size()) + " indices)");
-        write_result("✅ Config saved");
-        write_apply_log("✅ Config saved: " + std::to_string(g_selectedIndices.size()) + " indices");
-    } else {
-        write_report("❌ Failed to save config");
-    }
-}
-
-// ======================== بارگذاری تنظیمات ========================
-static void load_config() {
-    g_selectedIndices.clear();
-    
-    std::ifstream f(g_configFile);
-    if (f.is_open()) {
-        int idx;
-        while (f >> idx) {
-            if (idx >= 0 && idx < MAX_BUTTONS) {
-                g_selectedIndices.push_back(idx);
-            }
-        }
-        f.close();
-        write_report("✅ Config loaded (" + std::to_string(g_selectedIndices.size()) + " indices)");
-    } else {
-        write_report("⚠️ No config file");
-    }
-}
-
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    load_config();
+    jobjectArray ret;
     
-    // 6 المان: Category, InputText, 3 دکمه, RichTextView
-    const int totalFeatures = 6;
+    const char *features[] = {
+        OBFUSCATE("Category_👤 Player Info"),
+        OBFUSCATE("Button_Get Player Info (Username + Character ID)"),
+        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/player_info.txt"),
+    };
     
-    jobjectArray ret = (jobjectArray)env->NewObjectArray(
-        totalFeatures,
-        env->FindClass(OBFUSCATE("java/lang/String")),
-        env->NewStringUTF("")
-    );
+    int total = sizeof features / sizeof features[0];
+    ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
     
     if (ret == nullptr) {
         write_report("❌ Failed to create jobjectArray!");
         return nullptr;
     }
     
-    int idx = 0;
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Disabler")));
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("InputText_Enter Indices (e.g. 0,4,5)")));
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Apply Selected")));
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Enable All")));
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Extract & Save")));
-    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/")));
+    for (int i = 0; i < total; i++) {
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+    }
     
-    write_report("✅ GetFeatureList returned " + std::to_string(totalFeatures) + " features");
+    write_report("✅ GetFeatureList returned " + std::to_string(total) + " features");
     return ret;
 }
 
@@ -383,47 +340,41 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
-    // featNum 0 = InputText (ورودی ایندکس‌ها)
-    // featNum 1 = Apply Selected
-    // featNum 2 = Enable All
-    // featNum 3 = Extract & Save
-    
     switch (featNum) {
-        case 0: {
-            // ====== InputText: دریافت ایندکس‌ها ======
-            const char* textStr = (text != nullptr) ? env->GetStringUTFChars(text, nullptr) : "";
-            if (textStr != nullptr && strlen(textStr) > 0) {
-                std::string input(textStr);
-                g_selectedIndices = parse_indices(input);
-                write_report("📝 Indices entered: " + input);
-                write_report("📌 Parsed " + std::to_string(g_selectedIndices.size()) + " indices");
-                write_result("📝 Entered: " + input + " -> " + std::to_string(g_selectedIndices.size()) + " indices");
-                env->ReleaseStringUTFChars(text, textStr);
-            } else {
-                write_report("⚠️ Empty input");
+        case 0:  // دکمه Get Player Info
+            write_report("\n🔘 Get Player Info button pressed");
+            write_result("🔘 Get Player Info button pressed");
+            
+            // گرفتن اطلاعات
+            get_player_info();
+            
+            // نمایش Toast
+            if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
+                std::string username = get_player_username();
+                int charId = get_player_character_id();
+                
+                std::string toastMsg = "Username: " + (username.empty() ? "(empty)" : username) + 
+                                      "\nCharacter ID: " + (charId < 0 ? "unknown" : std::to_string(charId));
+                
+                // Toast از طریق JNI
+                jclass toastClass = env->FindClass("android/widget/Toast");
+                jmethodID makeText = env->GetStaticMethodID(toastClass, "makeText", 
+                    "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
+                jmethodID show = env->GetMethodID(toastClass, "show", "()V");
+                
+                // پیدا کردن context
+                jclass contextClass = env->FindClass("android/app/ActivityThread");
+                jmethodID currentActivityThread = env->GetStaticMethodID(contextClass, 
+                    "currentActivityThread", "()Landroid/app/ActivityThread;");
+                jobject activityThread = env->CallStaticObjectMethod(contextClass, currentActivityThread);
+                jmethodID getApplication = env->GetMethodID(contextClass, "getApplication", "()Landroid/app/Application;");
+                jobject context = env->CallObjectMethod(activityThread, getApplication);
+                
+                jstring jMsg = env->NewStringUTF(toastMsg.c_str());
+                jobject toast = env->CallStaticObjectMethod(toastClass, makeText, context, jMsg, 1);
+                env->CallVoidMethod(toast, show);
+                env->DeleteLocalRef(jMsg);
             }
-            break;
-        }
-        
-        case 1:
-            // ====== Apply Selected ======
-            write_report("🔘 Apply Selected pressed");
-            write_result("🔘 Apply Selected pressed");
-            apply_selected_indices();
-            break;
-            
-        case 2:
-            // ====== Enable All ======
-            write_report("🔘 Enable All pressed");
-            write_result("🔘 Enable All pressed");
-            enable_all();
-            break;
-            
-        case 3:
-            // ====== Extract & Save ======
-            write_report("🔘 Extract & Save pressed");
-            write_result("🔘 Extract & Save pressed");
-            save_config();
             break;
             
         default:
@@ -434,23 +385,60 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    while (!isLibraryLoaded(targetLibName)) sleep(1);
-    write_report("✅ lib loaded");
-    
+    int waitCount = 0;
+
+    write_report("⏳ Waiting for libil2cpp.so to load...");
+    write_debug("⏳ Waiting for libil2cpp.so...");
+
+    while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
+        sleep(1);
+        waitCount++;
+    }
+
+    if (waitCount >= 30) {
+        write_report("❌ Timeout waiting for libil2cpp.so");
+        write_debug("⏰ Timeout!");
+        return;
+    }
+
+    write_report("✅ libil2cpp.so loaded successfully");
+    write_debug("✅ libil2cpp.so loaded!");
+
 #if defined(__aarch64__)
+    // ====== نصب هوک ======
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr && is_valid_address(startAddr)) {
-        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        write_report("✅ Hook installed");
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_report("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
+            write_debug("✅ GtaMenuControl.Start() hooked");
+        } else {
+            write_report("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
+            write_debug("❌ Hook failed");
+        }
+    } else {
+        write_report("❌ GtaMenuControl.Start() address not found!");
+        write_debug("❌ Address not found");
     }
 #endif
-    
-    for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
+
+    // ====== تلاش برای گرفتن instance ======
+    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
         sleep(1);
     }
     
-    load_config();
-    write_report("✅ hack done");
+    if (g_gtaInstance != nullptr) {
+        write_report("✅ Got GtaMenuControl instance after wait");
+    } else {
+        // تلاش مستقیم با get_Instance
+        g_gtaInstance = get_gta_menu_instance();
+        if (g_gtaInstance != nullptr) {
+            write_report("✅ Got GtaMenuControl instance via get_Instance");
+        }
+    }
+
+    write_report("✅ hack_thread finished successfully");
+    write_debug("✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
@@ -458,6 +446,24 @@ __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
-    write_report("🚀 lib_main called");
+
+    std::ofstream f(g_debugLog);
+    if (f.is_open()) {
+        f << "========== MOD LOADED ==========\n";
+        f << "Time: " << get_time() << "\n";
+        f << "===============================\n\n";
+        f.close();
+    }
+
+    std::ofstream report(g_reportLog);
+    if (report.is_open()) {
+        report << "========== FULL REPORT ==========\n";
+        report << "Started at: " << get_time() << "\n";
+        report << "==================================\n\n";
+        report.close();
+    }
+
+    write_report("🚀 lib_main called - mod loading");
+    write_debug("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
