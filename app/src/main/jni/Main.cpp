@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <iomanip>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -19,11 +21,14 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ) ========================
+// ======================== آفست‌ها (همه از دامپ) ========================
 #define OFFSET_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
 #define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
 #define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
+#define OFFSET_ENABLE_CALLED    0x20          // Selectable.m_EnableCalled
+#define OFFSET_GROUPS_ALLOW     0xE8          // Selectable.m_GroupsAllowInteraction
+#define OFFSET_TEXT_COMPONENT   0x108         // InputField/Button.m_TextComponent
 #define MAX_BUTTONS             30
 #define MAX_RETRIES             5
 
@@ -33,6 +38,7 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_reportLog = g_basePath + "full_report.txt";
+static std::string g_buttonsReport = g_basePath + "buttons_report.txt";
 
 // ======================== متغیرها ========================
 static bool g_crashHandlerInstalled = false;
@@ -69,6 +75,10 @@ static void write_result(const std::string& msg) {
     write_log(g_ipResultLog, msg);
 }
 
+static void write_buttons_report(const std::string& msg) {
+    write_log(g_buttonsReport, msg);
+}
+
 static void create_directory() {
     mkdir(g_basePath.c_str(), 0777);
 }
@@ -87,6 +97,8 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     f << "  pc: 0x" << std::hex << sc->pc << "\n";
     f << "  lr: 0x" << std::hex << sc->regs[30] << "\n";
     f << "  sp: 0x" << std::hex << sc->sp << "\n";
+    f << "  x0: 0x" << std::hex << sc->regs[0] << "\n";
+    f << "  x1: 0x" << std::hex << sc->regs[1] << "\n";
     #endif
     f << "========================================\n\n";
     f.close();
@@ -114,27 +126,107 @@ static void install_crash_handler() {
 static bool is_valid_address(void* addr) {
     if (addr == nullptr) return false;
     uintptr_t ptr = (uintptr_t)addr;
-    // آدرس‌های خیلی کوچک (مثل 0x8) یا خیلی بزرگ معتبر نیستن
     if (ptr < 0x1000) return false;
     if (ptr > 0x7FFFFFFFFFFFFF) return false;
-    // چک کن که readable باشه
     auto map = KittyMemory::getAddressMap(addr);
     return map.readable;
 }
 
-// ======================== گرفتن instance با get_Instance ========================
-static void* get_instance_getter() {
+// ======================== گرفتن متن دکمه ========================
+static std::string get_button_text(void* button) {
+    if (button == nullptr || !is_valid_address(button)) return "INVALID";
+    
+    // گرفتن TextComponent از Button
+    void* textComponent = *(void**)((uintptr_t)button + OFFSET_TEXT_COMPONENT);
+    if (textComponent == nullptr || !is_valid_address(textComponent)) return "NO_TEXT";
+    
+    // خواندن متن با Text.get_text
+    typedef const char* (*get_text_t)(void*);
+    get_text_t get_text = (get_text_t)getAbsoluteAddress("libil2cpp.so", "Text.get_text");
+    if (get_text == nullptr) return "NO_GET_TEXT";
+    
+    const char* text = get_text(textComponent);
+    if (text == nullptr) return "NULL_TEXT";
+    
+    return std::string(text);
+}
+
+// ======================== گزارش کامل دکمه‌ها ========================
+static void report_all_buttons(void** menuButtons) {
+    write_buttons_report("\n========== BUTTONS FULL REPORT ==========");
+    write_buttons_report("Time: " + get_time());
+    write_buttons_report("Instance: 0x" + std::to_string((uintptr_t)g_gtaInstance));
+    write_buttons_report("menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
+    write_buttons_report("");
+    write_buttons_report("+-------+------------------+----------------------+----------------------+----------------------+--------+");
+    write_buttons_report("| Index | Name             | Address              | Interactable         | EnableCalled         | Active |");
+    write_buttons_report("+-------+------------------+----------------------+----------------------+----------------------+--------+");
+    
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        void* btn = menuButtons[i];
+        if (btn == nullptr || !is_valid_address(btn)) {
+            // دکمه‌های null یا نامعتبر
+            std::string status = (btn == nullptr) ? "NULL" : "INVALID";
+            std::stringstream ss;
+            ss << "| " << std::setw(5) << i << " | " << std::setw(16) << status 
+               << " | " << std::setw(20) << "N/A" 
+               << " | " << std::setw(20) << "N/A" 
+               << " | " << std::setw(20) << "N/A" 
+               << " | " << std::setw(6) << "N/A" << " |";
+            write_buttons_report(ss.str());
+            continue;
+        }
+        
+        // گرفتن اسم دکمه
+        std::string name = get_button_text(btn);
+        if (name.length() > 16) name = name.substr(0, 13) + "...";
+        
+        // گرفتن وضعیت‌ها
+        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
+        bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
+        
+        std::string intStatus = (interactable != nullptr && is_valid_address(interactable)) 
+                                ? (*interactable ? "true" : "false") : "ERR";
+        std::string enaStatus = (enableCalled != nullptr && is_valid_address(enableCalled)) 
+                                ? (*enableCalled ? "true" : "false") : "ERR";
+        std::string activeStatus = "?";  // برای فعال بودن کلی
+        
+        std::stringstream ss;
+        ss << "| " << std::setw(5) << i 
+           << " | " << std::setw(16) << name 
+           << " | 0x" << std::setw(18) << std::hex << (uintptr_t)btn 
+           << " | " << std::setw(20) << intStatus 
+           << " | " << std::setw(20) << enaStatus 
+           << " | " << std::setw(6) << activeStatus << " |";
+        write_buttons_report(ss.str());
+    }
+    
+    write_buttons_report("+-------+------------------+----------------------+----------------------+----------------------+--------+");
+    write_buttons_report("========== END OF REPORT ==========\n");
+}
+
+// ======================== گرفتن instance ========================
+static void* get_gta_instance() {
+    // روش 1: get_Instance
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance == nullptr) {
-        write_report("   ❌ get_Instance not found!");
-        return nullptr;
+    if (get_Instance != nullptr) {
+        void* instance = get_Instance();
+        if (instance != nullptr && is_valid_address(instance)) {
+            write_report("   ✅ get_Instance: 0x" + std::to_string((uintptr_t)instance));
+            return instance;
+        }
     }
-    void* instance = get_Instance();
-    if (instance != nullptr && is_valid_address(instance)) {
-        write_report("   ✅ get_Instance: 0x" + std::to_string((uintptr_t)instance));
-        return instance;
+    
+    // روش 2: منتظر هوک
+    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
+        sleep(1);
     }
+    if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
+        write_report("   ✅ Hook: 0x" + std::to_string((uintptr_t)g_gtaInstance));
+        return g_gtaInstance;
+    }
+    
     return nullptr;
 }
 
@@ -143,148 +235,128 @@ void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        write_report("✅ Hook captured instance: 0x" + std::to_string((uintptr_t)instance));
+        write_report("✅ Hook captured: 0x" + std::to_string((uintptr_t)instance));
     }
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
     }
 }
 
-// ======================== دیسیبل کردن دکمه‌ها (فقط menuButtons) ========================
+// ======================== دیسیبل کردن دکمه‌ها ========================
 static void disable_menu_buttons() {
     if (g_buttonsDisabled) {
-        write_report("⚠️ Already disabled, skipping...");
+        write_report("⚠️ Already disabled");
         return;
     }
     
     write_report("\n========== DISABLE MENU BUTTONS ==========");
     write_report("Time: " + get_time());
     
-    // ====== مرحله 1: گرفتن instance ======
-    void* instance = nullptr;
-    
-    // تلاش 1: get_Instance
-    write_report("   Method 1: get_Instance()");
-    instance = get_instance_getter();
-    if (instance != nullptr) {
-        write_report("✅ Got instance via get_Instance");
-        g_gtaInstance = instance;
-    }
-    
-    // تلاش 2: منتظر هوک
-    if (instance == nullptr) {
-        write_report("   Method 2: Waiting for hook...");
-        for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
-            write_report("   ⏳ Waiting... (" + std::to_string(i+1) + "/15)");
-            sleep(1);
-        }
-        instance = g_gtaInstance;
-        if (instance != nullptr) {
-            write_report("✅ Got instance via hook");
-        }
-    }
-    
+    void* instance = get_gta_instance();
     if (instance == nullptr || !is_valid_address(instance)) {
-        write_report("❌ Failed to get instance!");
-        write_result("❌ Failed to get instance!");
+        write_report("❌ No instance!");
         return;
     }
+    write_report("✅ Instance: 0x" + std::to_string((uintptr_t)instance));
     
-    write_report("✅ Using instance: 0x" + std::to_string((uintptr_t)instance));
-    
-    // ====== مرحله 2: گرفتن menuButtons ======
     void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
     if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        write_report("❌ menuButtons is null or invalid!");
-        write_result("❌ menuButtons invalid!");
+        write_report("❌ menuButtons invalid!");
         return;
     }
     write_report("✅ menuButtons at: 0x" + std::to_string((uintptr_t)menuButtons));
     
-    // ====== مرحله 3: شمارش و دیسیبل کردن ======
-    // دکمه‌هایی که باید فعال بمونن: LAN (0,1) و SETTINGS (4)
-    int keepActive[] = {0, 1, 4};
-    int keepCount = 3;
+    // ====== گزارش کامل ======
+    report_all_buttons(menuButtons);
     
-    int totalButtons = 0;
-    int disabledCount = 0;
-    int invalidCount = 0;
+    // ====== دیسیبل کردن ======
+    int keepActive[] = {0, 1, 4};
+    int total = 0, disabled = 0, errors = 0;
     
     for (int i = 0; i < MAX_BUTTONS; i++) {
         void* btn = menuButtons[i];
+        if (btn == nullptr || !is_valid_address(btn)) continue;
+        total++;
         
-        // اگه آدرس معتبر نباشه، رد کن
-        if (!is_valid_address(btn)) {
-            invalidCount++;
-            continue;
-        }
-        
-        totalButtons++;
-        
-        // چک کن آیا این دکمه باید فعال بمونه؟
         bool shouldKeep = false;
-        for (int j = 0; j < keepCount; j++) {
-            if (keepActive[j] == i) {
-                shouldKeep = true;
-                break;
-            }
+        for (int j = 0; j < 3; j++) {
+            if (keepActive[j] == i) { shouldKeep = true; break; }
         }
         
         if (shouldKeep) {
-            write_report("   🔵 Keeping active: index " + std::to_string(i));
+            write_report("   🔵 Keeping: index " + std::to_string(i) + " (" + get_button_text(btn) + ")");
             continue;
         }
         
-        // غیرفعال کردن با m_Interactable
+        // روش 1: m_Interactable = false
         bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
         if (interactable != nullptr && is_valid_address(interactable)) {
             *interactable = false;
-            disabledCount++;
-            write_report("   ❌ Disabled: index " + std::to_string(i));
-        } else {
-            write_report("   ⚠️ Cannot disable index " + std::to_string(i));
-        }
+        } else { errors++; }
+        
+        // روش 2: m_EnableCalled = false
+        bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
+        if (enableCalled != nullptr && is_valid_address(enableCalled)) {
+            *enableCalled = false;
+        } else { errors++; }
+        
+        // روش 3: m_GroupsAllowInteraction = false
+        bool* groupsAllow = (bool*)((uintptr_t)btn + OFFSET_GROUPS_ALLOW);
+        if (groupsAllow != nullptr && is_valid_address(groupsAllow)) {
+            *groupsAllow = false;
+        } else { errors++; }
+        
+        disabled++;
+        write_report("   ❌ Disabled: index " + std::to_string(i) + " (" + get_button_text(btn) + ")");
     }
     
     g_buttonsDisabled = true;
-    write_report("✅ Total buttons found: " + std::to_string(totalButtons));
-    write_report("✅ Disabled buttons: " + std::to_string(disabledCount));
-    write_report("✅ Invalid addresses skipped: " + std::to_string(invalidCount));
-    write_report("✅ Kept active: LAN (0,1) and SETTINGS (4)");
-    write_result("✅ Disabled " + std::to_string(disabledCount) + " buttons (LAN & SETTINGS kept active)");
-    write_report("========== DISABLE COMPLETE ==========\n");
+    write_report("✅ Total: " + std::to_string(total) + ", Disabled: " + std::to_string(disabled) + ", Errors: " + std::to_string(errors));
+    write_result("✅ Disabled " + std::to_string(disabled) + " buttons (kept LAN 0,1 and SETTINGS 4)");
+    write_report("========== DONE ==========\n");
+    
+    // گزارش بعد از دیسیبل
+    report_all_buttons(menuButtons);
 }
 
-// ======================== فعال کردن دوباره دکمه‌ها ========================
+// ======================== فعال کردن دکمه‌ها ========================
 static void enable_menu_buttons() {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No valid instance to enable buttons!");
-        write_result("❌ No valid instance!");
+        write_report("❌ No instance!");
         return;
     }
     
     void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
     if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
         write_report("❌ menuButtons invalid!");
-        write_result("❌ menuButtons invalid!");
         return;
     }
     
-    int enabledCount = 0;
+    int enabled = 0;
     for (int i = 0; i < MAX_BUTTONS; i++) {
         void* btn = menuButtons[i];
-        if (!is_valid_address(btn)) continue;
+        if (btn == nullptr || !is_valid_address(btn)) continue;
         
         bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
         if (interactable != nullptr && is_valid_address(interactable)) {
             *interactable = true;
-            enabledCount++;
+            enabled++;
+        }
+        
+        bool* enableCalled = (bool*)((uintptr_t)btn + OFFSET_ENABLE_CALLED);
+        if (enableCalled != nullptr && is_valid_address(enableCalled)) {
+            *enableCalled = true;
+        }
+        
+        bool* groupsAllow = (bool*)((uintptr_t)btn + OFFSET_GROUPS_ALLOW);
+        if (groupsAllow != nullptr && is_valid_address(groupsAllow)) {
+            *groupsAllow = true;
         }
     }
     
     g_buttonsDisabled = false;
-    write_report("✅ Enabled " + std::to_string(enabledCount) + " buttons");
-    write_result("✅ Enabled " + std::to_string(enabledCount) + " buttons");
+    write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
+    write_result("✅ Enabled " + std::to_string(enabled) + " buttons");
 }
 
 // ======================== منو ========================
@@ -292,6 +364,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
         OBFUSCATE("Category_🔧 Tools"),
+        OBFUSCATE("Button_Report All Buttons"),
         OBFUSCATE("Button_Disable Menu Buttons"),
         OBFUSCATE("Button_Enable Menu Buttons"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
@@ -310,13 +383,27 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
     switch (featNum) {
         case 0:
+            write_report("🔘 Report button pressed");
+            write_result("🔘 Report button pressed");
+            if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
+                void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+                if (menuButtons != nullptr && is_valid_address(menuButtons)) {
+                    report_all_buttons(menuButtons);
+                    write_report("✅ Report saved to buttons_report.txt");
+                }
+            } else {
+                write_report("❌ No instance for report!");
+            }
+            break;
+            
+        case 1:
             write_report("🔘 Disable button pressed");
             write_result("🔘 Disable button pressed");
             g_buttonsDisabled = false;
             disable_menu_buttons();
             break;
             
-        case 1:
+        case 2:
             write_report("🔘 Enable button pressed");
             write_result("🔘 Enable button pressed");
             enable_menu_buttons();
@@ -330,49 +417,20 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    int waitCount = 0;
-
-    write_report("⏳ Waiting for libil2cpp.so to load...");
-    write_debug("⏳ Waiting for libil2cpp.so...");
-
-    while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
-        sleep(1);
-        waitCount++;
-    }
-
-    if (waitCount >= 30) {
-        write_report("❌ Timeout waiting for libil2cpp.so");
-        write_debug("⏰ Timeout!");
-        return;
-    }
-
-    write_report("✅ libil2cpp.so loaded successfully");
-    write_debug("✅ libil2cpp.so loaded!");
-
+    while (!isLibraryLoaded(targetLibName)) sleep(1);
+    write_report("✅ lib loaded");
+    
 #if defined(__aarch64__)
-    // ====== نصب هوک روی Start ======
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr && is_valid_address(startAddr)) {
-        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        if (res == 0) {
-            write_report("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
-            write_debug("✅ GtaMenuControl.Start() hooked");
-        } else {
-            write_report("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
-            write_debug("❌ Hook failed");
-        }
-    } else {
-        write_report("❌ GtaMenuControl.Start() address not found!");
-        write_debug("❌ Address not found");
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        write_report("✅ Hook installed");
     }
 #endif
-
-    // ====== تلاش اولیه برای دیسیبل کردن (بعد از 3 ثانیه) ======
+    
     sleep(3);
     disable_menu_buttons();
-
-    write_report("✅ hack_thread finished successfully");
-    write_debug("✅ hack_thread finished");
+    write_report("✅ hack done");
 }
 
 // ======================== تابع ورودی ========================
@@ -380,7 +438,7 @@ __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
-
+    
     std::ofstream f(g_debugLog);
     if (f.is_open()) {
         f << "========== MOD LOADED ==========\n";
@@ -388,7 +446,7 @@ void lib_main() {
         f << "===============================\n\n";
         f.close();
     }
-
+    
     std::ofstream report(g_reportLog);
     if (report.is_open()) {
         report << "========== FULL REPORT ==========\n";
@@ -396,8 +454,7 @@ void lib_main() {
         report << "==================================\n\n";
         report.close();
     }
-
-    write_report("🚀 lib_main called - mod loading");
-    write_debug("🚀 lib_main called");
+    
+    write_report("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
