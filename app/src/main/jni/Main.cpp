@@ -21,14 +21,15 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
-#define OFFSET_GET_INSTANCE     0xF570C4
-#define OFFSET_GTA_START        0xF571A4
-#define OFFSET_MENU_BUTTONS     0x30
-#define OFFSET_INTERACTABLE     0xD8
-#define OFFSET_ENABLE_CALLED    0x20
-#define OFFSET_GROUPS_ALLOW     0xE8
+// ======================== آفست‌ها (همه از دامپ) ========================
+#define OFFSET_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
+#define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
+#define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
+#define OFFSET_ENABLE_CALLED    0x20          // Selectable.m_EnableCalled
+#define OFFSET_GROUPS_ALLOW     0xE8          // Selectable.m_GroupsAllowInteraction
 #define MAX_BUTTONS             30
+#define MAX_WAIT                20
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -42,7 +43,7 @@ static bool g_crashHandlerInstalled = false;
 static bool g_buttonsDisabled = false;
 static void* g_gtaInstance = nullptr;
 
-// ======================== ذخیره تنظیمات دکمه‌ها ========================
+// ======================== لیست ایندکس‌های دیسیبل ========================
 static std::vector<int> g_disabledIndices;
 static std::vector<int> g_validIndices;
 
@@ -122,8 +123,9 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== گرفتن instance ========================
+// ======================== گرفتن instance (با انتظار) ========================
 static void* get_gta_instance() {
+    // روش 1: get_Instance
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
     if (get_Instance != nullptr) {
@@ -133,12 +135,14 @@ static void* get_gta_instance() {
         }
     }
     
-    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
+    // روش 2: منتظر هوک
+    for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
         sleep(1);
     }
     if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
         return g_gtaInstance;
     }
+    
     return nullptr;
 }
 
@@ -147,7 +151,7 @@ void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        write_report("✅ Hook captured: 0x" + std::to_string((uintptr_t)instance));
+        write_report("✅ Hook captured");
     }
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
@@ -160,13 +164,13 @@ static void scan_valid_buttons() {
     
     void* instance = get_gta_instance();
     if (instance == nullptr || !is_valid_address(instance)) {
-        write_report("❌ No instance for scanning!");
+        write_report("❌ No instance for scanning");
         return;
     }
     
     void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
     if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        write_report("❌ menuButtons invalid!");
+        write_report("❌ menuButtons invalid for scanning");
         return;
     }
     
@@ -180,31 +184,30 @@ static void scan_valid_buttons() {
     write_report("✅ Scanned " + std::to_string(g_validIndices.size()) + " valid buttons");
 }
 
-// ======================== دیسیبل کردن یک ایندکس خاص ========================
-static void disable_button_index(int index) {
+// ======================== دیسیبل کردن یک ایندکس ========================
+static void disable_single_index(int index) {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No instance!");
+        write_report("❌ No instance");
         return;
     }
     
     void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
     if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
-        write_report("❌ menuButtons invalid!");
+        write_report("❌ menuButtons invalid");
         return;
     }
     
     if (index < 0 || index >= MAX_BUTTONS) {
-        write_report("❌ Invalid index: " + std::to_string(index));
+        write_report("❌ Invalid index " + std::to_string(index));
         return;
     }
     
     void* btn = menuButtons[index];
     if (btn == nullptr || !is_valid_address(btn)) {
-        write_report("❌ Button at index " + std::to_string(index) + " is invalid!");
+        write_report("❌ Button at index " + std::to_string(index) + " is invalid");
         return;
     }
     
-    // ۳ روش دیسیبل
     bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
     if (interactable != nullptr && is_valid_address(interactable)) {
         *interactable = false;
@@ -220,31 +223,63 @@ static void disable_button_index(int index) {
         *groupsAllow = false;
     }
     
-    write_report("   ❌ Disabled index: " + std::to_string(index));
+    write_report("   ❌ Disabled index " + std::to_string(index));
 }
 
-// ======================== اعمال دیسیبل کردن همه ========================
-static void apply_disabled_indices() {
+// ======================== اعمال دیسیبل کردن ========================
+static void apply_disabled() {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        write_report("❌ No instance!");
+        write_report("❌ No instance");
+        write_result("❌ No instance for apply");
         return;
     }
     
-    write_report("\n========== APPLY DISABLED INDICES ==========");
+    write_report("\n========== APPLY DISABLED ==========");
     write_report("Time: " + get_time());
-    write_report("Disabled indices: " + std::to_string(g_disabledIndices.size()));
+    write_report("Indices to disable: " + std::to_string(g_disabledIndices.size()));
     
     for (int idx : g_disabledIndices) {
-        disable_button_index(idx);
+        disable_single_index(idx);
     }
     
     g_buttonsDisabled = true;
-    write_report("✅ Applied " + std::to_string(g_disabledIndices.size()) + " disabled indices");
-    write_result("✅ Applied " + std::to_string(g_disabledIndices.size()) + " disabled indices");
+    write_report("✅ Applied " + std::to_string(g_disabledIndices.size()) + " indices");
+    write_result("✅ Applied " + std::to_string(g_disabledIndices.size()) + " indices");
     write_report("========== DONE ==========\n");
 }
 
-// ======================== ذخیره تنظیمات در فایل ========================
+// ======================== فعال کردن همه ========================
+static void enable_all() {
+    if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
+        write_report("❌ No instance");
+        return;
+    }
+    
+    void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+    if (menuButtons == nullptr || !is_valid_address(menuButtons)) {
+        write_report("❌ menuButtons invalid");
+        return;
+    }
+    
+    int enabled = 0;
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        void* btn = menuButtons[i];
+        if (btn == nullptr || !is_valid_address(btn)) continue;
+        
+        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
+        if (interactable != nullptr && is_valid_address(interactable)) {
+            *interactable = true;
+            enabled++;
+        }
+    }
+    
+    g_disabledIndices.clear();
+    g_buttonsDisabled = false;
+    write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
+    write_result("✅ Enabled all buttons");
+}
+
+// ======================== ذخیره تنظیمات ========================
 static void save_config() {
     std::ofstream f(g_configFile);
     if (f.is_open()) {
@@ -253,13 +288,13 @@ static void save_config() {
         }
         f.close();
         write_report("✅ Config saved: " + std::to_string(g_disabledIndices.size()) + " indices");
-        write_result("✅ Config saved with " + std::to_string(g_disabledIndices.size()) + " indices");
+        write_result("✅ Config saved");
     } else {
-        write_report("❌ Failed to save config!");
+        write_report("❌ Failed to save config");
     }
 }
 
-// ======================== بارگذاری تنظیمات از فایل ========================
+// ======================== بارگذاری تنظیمات ========================
 static void load_config() {
     g_disabledIndices.clear();
     
@@ -272,35 +307,34 @@ static void load_config() {
         f.close();
         write_report("✅ Config loaded: " + std::to_string(g_disabledIndices.size()) + " indices");
     } else {
-        write_report("⚠️ No config file found, using default");
-        // پیش‌فرض: فقط index 0 و 4 رو فعال نگه دار
-        g_disabledIndices = {1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29};
+        write_report("⚠️ No config file, using default (keep 0 and 4)");
+        // پیش‌فرض: همه به جز 0 و 4
+        for (int i = 0; i < MAX_BUTTONS; i++) {
+            if (i != 0 && i != 4) {
+                g_disabledIndices.push_back(i);
+            }
+        }
     }
 }
 
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    // ====== اول دکمه‌های معتبر رو اسکن کن ======
+    // اسکن اولیه
     scan_valid_buttons();
     load_config();
     
     std::vector<std::string> features;
     features.push_back("Category_🔘 Button Manager");
-    features.push_back("Category_Select indices to disable:");
     
-    // ====== دکمه‌های 0 تا 29 رو نشون بده ======
+    // ۳۰ تا CheckBox
     for (int i = 0; i < MAX_BUTTONS; i++) {
         std::string label = "CheckBox_Index " + std::to_string(i);
         
-        // اگه ایندکس معتبر نیست، غیرفعال کن
+        // اگه ایندکس معتبر نیست، غیرفعال
         bool isValid = false;
         for (int validIdx : g_validIndices) {
-            if (validIdx == i) {
-                isValid = true;
-                break;
-            }
+            if (validIdx == i) { isValid = true; break; }
         }
-        
         if (!isValid) {
             label += " (INVALID)";
         }
@@ -308,17 +342,13 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         // اگه توی لیست دیسیبل هست، چک بزن
         bool isChecked = false;
         for (int disabledIdx : g_disabledIndices) {
-            if (disabledIdx == i) {
-                isChecked = true;
-                break;
-            }
+            if (disabledIdx == i) { isChecked = true; break; }
         }
-        
         if (isChecked) {
             label = "True_" + label;
         }
         
-        features.push_back(label.c_str());
+        features.push_back(label);
     }
     
     features.push_back("Category_");
@@ -344,32 +374,28 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
-    // featNum: 0 = Index 0, 1 = Index 1, ... 29 = Index 29
+    // featNum 0-29 = Index
     // 30 = Apply, 31 = Enable All, 32 = Extract & Save
     
     if (featNum >= 0 && featNum < MAX_BUTTONS) {
-        // انتخاب/لغو انتخاب یک ایندکس
         int index = featNum;
         
         if (boolean) {
-            // اضافه کردن به لیست دیسیبل
-            bool alreadyExists = false;
+            // اضافه کردن
+            bool exists = false;
             for (int idx : g_disabledIndices) {
-                if (idx == index) {
-                    alreadyExists = true;
-                    break;
-                }
+                if (idx == index) { exists = true; break; }
             }
-            if (!alreadyExists) {
+            if (!exists) {
                 g_disabledIndices.push_back(index);
-                write_report("   ➕ Added index " + std::to_string(index) + " to disable list");
+                write_report("   ➕ Added index " + std::to_string(index));
             }
         } else {
-            // حذف از لیست دیسیبل
+            // حذف کردن
             for (auto it = g_disabledIndices.begin(); it != g_disabledIndices.end(); ++it) {
                 if (*it == index) {
                     g_disabledIndices.erase(it);
-                    write_report("   ➖ Removed index " + std::to_string(index) + " from disable list");
+                    write_report("   ➖ Removed index " + std::to_string(index));
                     break;
                 }
             }
@@ -377,44 +403,19 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         return;
     }
     
-    // دکمه‌های کنترل
     switch (featNum) {
-        case 30:  // Apply Selected
-            write_report("🔘 Apply Selected button pressed");
-            apply_disabled_indices();
+        case 30:
+            write_report("🔘 Apply Selected pressed");
+            apply_disabled();
             break;
-            
-        case 31:  // Enable All
-            write_report("🔘 Enable All button pressed");
-            if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
-                void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
-                if (menuButtons != nullptr && is_valid_address(menuButtons)) {
-                    int enabled = 0;
-                    for (int i = 0; i < MAX_BUTTONS; i++) {
-                        void* btn = menuButtons[i];
-                        if (btn == nullptr || !is_valid_address(btn)) continue;
-                        
-                        bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
-                        if (interactable != nullptr && is_valid_address(interactable)) {
-                            *interactable = true;
-                            enabled++;
-                        }
-                    }
-                    g_buttonsDisabled = false;
-                    g_disabledIndices.clear();
-                    write_report("✅ Enabled " + std::to_string(enabled) + " buttons");
-                    write_result("✅ Enabled all buttons");
-                }
-            }
+        case 31:
+            write_report("🔘 Enable All pressed");
+            enable_all();
             break;
-            
-        case 32:  // Extract & Save
-            write_report("🔘 Extract & Save button pressed");
+        case 32:
+            write_report("🔘 Extract & Save pressed");
             save_config();
-            write_report("✅ Config saved to: " + g_configFile);
-            write_result("✅ Config saved!");
             break;
-            
         default:
             write_report("Unknown featNum: " + std::to_string(featNum));
             break;
@@ -434,12 +435,11 @@ void hack_thread() {
     }
 #endif
     
-    // صبر کن تا منو لود بشه
-    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) {
+    // منتظر لودینگ
+    for (int i = 0; i < MAX_WAIT && g_gtaInstance == nullptr; i++) {
         sleep(1);
     }
     
-    // اسکن دکمه‌ها
     scan_valid_buttons();
     load_config();
     
