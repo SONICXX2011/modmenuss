@@ -8,8 +8,6 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
-#include <vector>
-#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -21,9 +19,10 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
 // ======================== آفست‌ها ========================
-#define OFFSET_GTA_START        0xF571A4      // GtaMenuControl.Start()
-#define OFFSET_MENU_BUTTONS     0x30          // GtaMenuControl.menuButtons
-#define OFFSET_INTERACTABLE     0xD8          // Selectable.m_Interactable
+#define OFFSET_GET_INSTANCE     0xF570C4
+#define OFFSET_GTA_START        0xF571A4
+#define OFFSET_MENU_BUTTONS     0x30
+#define OFFSET_INTERACTABLE     0xD8
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -34,9 +33,8 @@ static std::string g_reportLog = g_basePath + "full_report.txt";
 
 // ======================== متغیرها ========================
 static bool g_crashHandlerInstalled = false;
-static void* g_gtaInstance = nullptr;
-static bool g_gtaReady = false;
 static bool g_buttonsDisabled = false;
+static void* g_gtaInstance = nullptr;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -62,6 +60,10 @@ static void write_debug(const std::string& msg) {
 
 static void write_report(const std::string& msg) {
     write_log(g_reportLog, msg);
+}
+
+static void write_result(const std::string& msg) {
+    write_log(g_ipResultLog, msg);
 }
 
 static void create_directory() {
@@ -105,116 +107,211 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== دیسیبل کردن دکمه‌ها ========================
-static void disable_menu_buttons() {
+// ======================== روش 1: get_Instance ========================
+static void* get_instance_method1() {
+    typedef void* (*get_instance_t)();
+    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
+    if (get_Instance == nullptr) {
+        write_report("   ❌ get_Instance not found!");
+        return nullptr;
+    }
+    void* instance = get_Instance();
+    if (instance != nullptr) {
+        write_report("   ✅ get_Instance: 0x" + std::to_string((uintptr_t)instance));
+    }
+    return instance;
+}
+
+// ======================== روش 2: هوک روی Start ========================
+void (*orig_GtaMenuStart)(void *instance);
+void hook_GtaMenuStart(void *instance) {
+    if (instance != nullptr) {
+        g_gtaInstance = instance;
+        write_report("   ✅ Hook Start: 0x" + std::to_string((uintptr_t)instance));
+    }
+    if (orig_GtaMenuStart) {
+        orig_GtaMenuStart(instance);
+    }
+}
+
+static void* get_instance_method2() {
+    for (int i = 0; i < 10 && g_gtaInstance == nullptr; i++) {
+        sleep(1);
+    }
+    return g_gtaInstance;
+}
+
+// ======================== روش 3: FindObjectOfType (JNI) ========================
+static void* get_instance_method3(JNIEnv* env) {
+    if (env == nullptr) return nullptr;
+    jclass objClass = env->FindClass("UnityEngine.Object");
+    if (objClass == nullptr) return nullptr;
+    jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
+    if (findObj == nullptr) return nullptr;
+    jclass gtaClass = env->FindClass("GtaMenuControl");
+    if (gtaClass == nullptr) return nullptr;
+    jobject instance = env->CallStaticObjectMethod(objClass, findObj, gtaClass);
+    if (instance != nullptr) {
+        write_report("   ✅ FindObjectOfType: 0x" + std::to_string((uintptr_t)instance));
+        return instance;
+    }
+    return nullptr;
+}
+
+// ======================== روش 4: از طریق Name (Find) ========================
+static void* get_instance_method4(JNIEnv* env) {
+    if (env == nullptr) return nullptr;
+    jclass gameObjClass = env->FindClass("UnityEngine.GameObject");
+    if (gameObjClass == nullptr) return nullptr;
+    jmethodID findMethod = env->GetStaticMethodID(gameObjClass, "Find", "(Ljava/lang/String;)LUnityEngine/GameObject;");
+    if (findMethod == nullptr) return nullptr;
+    jstring name = env->NewStringUTF("GtaMenuControl");
+    jobject go = env->CallStaticObjectMethod(gameObjClass, findMethod, name);
+    env->DeleteLocalRef(name);
+    if (go != nullptr) {
+        jmethodID getComp = env->GetMethodID(gameObjClass, "GetComponent", "(Ljava/lang/Class;)LUnityEngine/Component;");
+        if (getComp != nullptr) {
+            jclass gtaClass = env->FindClass("GtaMenuControl");
+            if (gtaClass != nullptr) {
+                jobject instance = env->CallObjectMethod(go, getComp, gtaClass);
+                if (instance != nullptr) {
+                    write_report("   ✅ GameObject.Find: 0x" + std::to_string((uintptr_t)instance));
+                    return instance;
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+// ======================== روش 5: از طریق Resources ========================
+static void* get_instance_method5(JNIEnv* env) {
+    if (env == nullptr) return nullptr;
+    jclass resourcesClass = env->FindClass("UnityEngine.Resources");
+    if (resourcesClass == nullptr) return nullptr;
+    jmethodID findObjOfTypeAll = env->GetStaticMethodID(resourcesClass, "FindObjectsOfTypeAll", "(Ljava/lang/Class;)[LUnityEngine/Object;");
+    if (findObjOfTypeAll == nullptr) return nullptr;
+    jclass gtaClass = env->FindClass("GtaMenuControl");
+    if (gtaClass == nullptr) return nullptr;
+    jobjectArray arr = (jobjectArray)env->CallStaticObjectMethod(resourcesClass, findObjOfTypeAll, gtaClass);
+    if (arr != nullptr && env->GetArrayLength(arr) > 0) {
+        jobject instance = env->GetObjectArrayElement(arr, 0);
+        if (instance != nullptr) {
+            write_report("   ✅ Resources.FindObjectsOfTypeAll: 0x" + std::to_string((uintptr_t)instance));
+            return instance;
+        }
+    }
+    return nullptr;
+}
+
+// ======================== گرفتن instance با همه روش‌ها ========================
+static void* get_gta_instance(JNIEnv* env) {
+    write_report("🔍 Getting GtaMenuControl instance...");
+    
+    void* instance = nullptr;
+    
+    // روش 1: get_Instance
+    write_report("   Method 1: get_Instance()");
+    instance = get_instance_method1();
+    if (instance != nullptr) return instance;
+    
+    // روش 2: هوک
+    write_report("   Method 2: Hook Start()");
+    instance = get_instance_method2();
+    if (instance != nullptr) return instance;
+    
+    // روش 3: FindObjectOfType
+    write_report("   Method 3: FindObjectOfType");
+    instance = get_instance_method3(env);
+    if (instance != nullptr) return instance;
+    
+    // روش 4: GameObject.Find
+    write_report("   Method 4: GameObject.Find");
+    instance = get_instance_method4(env);
+    if (instance != nullptr) return instance;
+    
+    // روش 5: Resources
+    write_report("   Method 5: Resources.FindObjectsOfTypeAll");
+    instance = get_instance_method5(env);
+    if (instance != nullptr) return instance;
+    
+    write_report("❌ All methods failed!");
+    return nullptr;
+}
+
+// ======================== دیسیبل کردن menuButtons ========================
+static void disable_menu_buttons(JNIEnv* env) {
     if (g_buttonsDisabled) {
-        write_report("⚠️ Buttons already disabled, skipping...");
+        write_report("⚠️ Already disabled!");
         return;
     }
     
     write_report("\n========== DISABLE MENU BUTTONS ==========");
     write_report("Time: " + get_time());
     
-    if (g_gtaInstance == nullptr) {
-        write_report("❌ GtaMenuControl instance is null!");
-        write_log(g_ipResultLog, "❌ GtaMenuControl instance is null!");
-        return;
-    }
-    
-    try {
-        void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (attempt > 0) {
+            write_report("🔄 Retry " + std::to_string(attempt) + "...");
+            sleep(1);
+        }
+        
+        void* instance = get_gta_instance(env);
+        if (instance == nullptr) {
+            write_report("   ⚠️ Instance null, retrying...");
+            continue;
+        }
+        
+        g_gtaInstance = instance;
+        write_report("✅ Instance: 0x" + std::to_string((uintptr_t)instance));
+        
+        // گرفتن آرایه menuButtons
+        void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
         if (menuButtons == nullptr) {
-            write_report("❌ menuButtons is null!");
-            write_log(g_ipResultLog, "❌ menuButtons is null!");
-            return;
+            write_report("   ⚠️ menuButtons null, retrying...");
+            continue;
         }
-        write_report("✅ menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
         
-        int totalButtons = 0;
-        while (totalButtons < 20 && menuButtons[totalButtons] != nullptr) {
-            totalButtons++;
+        // شمارش دکمه‌ها
+        int count = 0;
+        for (int i = 0; i < 20; i++) {
+            if (menuButtons[i] != nullptr) count++;
         }
-        write_report("✅ Total buttons found: " + std::to_string(totalButtons));
+        write_report("✅ Found " + std::to_string(count) + " buttons");
         
-        int keepActive[] = {0, 1, 4};
-        int disabledCount = 0;
+        // اگه کمتر از 5 دکمه بود، دوباره تلاش کن
+        if (count < 5) {
+            write_report("   ⚠️ Only " + std::to_string(count) + " buttons, retrying...");
+            continue;
+        }
         
-        for (int i = 0; i < totalButtons; i++) {
-            bool shouldKeep = false;
-            for (int j = 0; j < 3; j++) {
-                if (keepActive[j] == i) {
-                    shouldKeep = true;
-                    break;
-                }
-            }
+        // دیسیبل کردن (به جز LAN=0,1 و SETTINGS=4)
+        int disabled = 0;
+        for (int i = 0; i < 20; i++) {
+            void* btn = menuButtons[i];
+            if (btn == nullptr) continue;
             
-            if (shouldKeep) {
-                write_report("   🔵 Keeping active: index " + std::to_string(i));
+            // LAN و SETTINGS فعال بمونن
+            if (i == 0 || i == 1 || i == 4) {
+                write_report("   🔵 Keeping: index " + std::to_string(i));
                 continue;
             }
             
-            void* button = menuButtons[i];
-            if (button == nullptr) continue;
-            
-            bool* interactable = (bool*)((uintptr_t)button + OFFSET_INTERACTABLE);
+            bool* interactable = (bool*)((uintptr_t)btn + OFFSET_INTERACTABLE);
             if (interactable != nullptr) {
                 *interactable = false;
-                disabledCount++;
-                write_report("   ❌ Disabled button index: " + std::to_string(i));
+                disabled++;
+                write_report("   ❌ Disabled: index " + std::to_string(i));
             }
         }
         
         g_buttonsDisabled = true;
-        write_report("✅ " + std::to_string(disabledCount) + " buttons disabled!");
-        write_log(g_ipResultLog, "✅ " + std::to_string(disabledCount) + " buttons disabled!");
-        write_report("========== DISABLE COMPLETE ==========\n");
-        
-    } catch (const std::exception& e) {
-        write_report("❌ Exception: " + std::string(e.what()));
-        write_log(g_crashLog, "⚠️ Exception: " + std::string(e.what()));
-    } catch (...) {
-        write_report("❌ Unknown exception!");
-        write_log(g_crashLog, "⚠️ Unknown exception!");
-    }
-}
-
-// ======================== هوک ========================
-void (*orig_GtaMenuStart)(void *instance);
-void hook_GtaMenuStart(void *instance) {
-    write_report("========== GtaMenuControl.Start() HOOKED ==========");
-    write_report("Time: " + get_time());
-    
-    if (instance != nullptr) {
-        g_gtaInstance = instance;
-        g_gtaReady = true;
-        write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
-        write_debug("✅ GtaMenuControl instance saved");
-        disable_menu_buttons();
-    } else {
-        write_report("❌ instance is null!");
-    }
-    write_report("====================================================\n");
-    
-    if (orig_GtaMenuStart) {
-        orig_GtaMenuStart(instance);
-    }
-}
-
-// ======================== get_Instance ========================
-static void* get_gta_instance() {
-    typedef void* (*get_instance_t)();
-    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    
-    if (get_Instance == nullptr) {
-        write_report("❌ GtaMenuControl.get_Instance not found!");
-        return nullptr;
+        write_report("✅ Disabled " + std::to_string(disabled) + " buttons!");
+        write_result("✅ Disabled " + std::to_string(disabled) + " buttons!");
+        write_report("========== COMPLETE ==========\n");
+        return;
     }
     
-    void* instance = get_Instance();
-    if (instance != nullptr) {
-        write_report("✅ GtaMenuControl instance via get_Instance: 0x" + std::to_string((uintptr_t)instance));
-    }
-    return instance;
+    write_report("❌ Failed after 5 attempts!");
 }
 
 // ======================== منو ========================
@@ -223,6 +320,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_🔧 Tools"),
         OBFUSCATE("Button_Disable Menu Buttons"),
+        OBFUSCATE("Button_Enable Menu Buttons"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
     };
     int total = sizeof features / sizeof features[0];
@@ -239,69 +337,45 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
     switch (featNum) {
         case 0:
-            write_report("🔘 Disable Menu Buttons button pressed");
-            write_log(g_ipResultLog, "🔘 Disable Menu Buttons button pressed");
-            disable_menu_buttons();
+            write_report("🔘 Disable button pressed");
+            g_buttonsDisabled = false;
+            disable_menu_buttons(env);
+            break;
+        case 1:
+            write_report("🔘 Enable button pressed");
+            if (g_gtaInstance != nullptr) {
+                void** menuButtons = *(void***)((uintptr_t)g_gtaInstance + OFFSET_MENU_BUTTONS);
+                if (menuButtons != nullptr) {
+                    for (int i = 0; i < 20; i++) {
+                        if (menuButtons[i] == nullptr) continue;
+                        bool* interactable = (bool*)((uintptr_t)menuButtons[i] + OFFSET_INTERACTABLE);
+                        if (interactable != nullptr) *interactable = true;
+                    }
+                    g_buttonsDisabled = false;
+                    write_report("✅ All buttons enabled!");
+                }
+            }
             break;
         default:
-            write_report("Unknown featNum: " + std::to_string(featNum));
             break;
     }
 }
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    int waitCount = 0;
-
-    write_report("⏳ Waiting for libil2cpp.so to load...");
-    write_debug("⏳ Waiting for libil2cpp.so...");
-
-    while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
-        sleep(1);
-        waitCount++;
-    }
-
-    if (waitCount >= 30) {
-        write_report("❌ Timeout waiting for libil2cpp.so");
-        write_debug("⏰ Timeout!");
-        return;
-    }
-
-    write_report("✅ libil2cpp.so loaded successfully");
-    write_debug("✅ libil2cpp.so loaded!");
-
-    // ====== گرفتن instance ======
-    write_report("🔍 Trying get_Instance()...");
-    void* instance1 = get_gta_instance();
-    if (instance1 != nullptr) {
-        g_gtaInstance = instance1;
-        g_gtaReady = true;
-        write_report("✅ Got instance via get_Instance()");
-        disable_menu_buttons();
-    }
-
+    while (!isLibraryLoaded(targetLibName)) sleep(1);
+    write_report("✅ libil2cpp.so loaded");
+    
 #if defined(__aarch64__)
-    if (!g_gtaReady) {
-        write_report("🔍 Trying hook on GtaMenuControl.Start()...");
-        void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
-        if (startAddr != nullptr) {
-            int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-            if (res == 0) {
-                write_report("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
-                write_debug("✅ GtaMenuControl.Start() hooked");
-            } else {
-                write_report("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
-                write_debug("❌ GtaMenuControl.Start() hook failed");
-            }
-        } else {
-            write_report("❌ GtaMenuControl.Start() address not found!");
-            write_debug("❌ GtaMenuControl.Start() address not found");
-        }
+    // هوک Start
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr != nullptr) {
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        write_report("✅ Hook installed");
     }
 #endif
-
-    write_report("✅ hack_thread finished successfully");
-    write_debug("✅ hack_thread finished");
+    
+    write_report("✅ hack_thread done");
 }
 
 // ======================== تابع ورودی ========================
@@ -309,7 +383,7 @@ __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
-
+    
     std::ofstream f(g_debugLog);
     if (f.is_open()) {
         f << "========== MOD LOADED ==========\n";
@@ -317,7 +391,7 @@ void lib_main() {
         f << "===============================\n\n";
         f.close();
     }
-
+    
     std::ofstream report(g_reportLog);
     if (report.is_open()) {
         report << "========== FULL REPORT ==========\n";
@@ -325,8 +399,7 @@ void lib_main() {
         report << "==================================\n\n";
         report.close();
     }
-
-    write_report("🚀 lib_main called - mod loading");
-    write_debug("🚀 lib_main called");
+    
+    write_report("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
