@@ -26,8 +26,8 @@
 #define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_GTA_CHAR_SELECT      0x40          // GtaMenuControl._charSelect
 #define OFFSET_CHAR_CURRENT         0x38          // GtaCharacterSelect.currentChar
-#define OFFSET_CHAR_USERNAME        0x50          // GtaCharacterSelect.usernameStat
-#define OFFSET_TEXT_M_TEXT          0xE0          // Text.m_Text
+#define OFFSET_CHAR_NAME_INPUT      0x48          // GtaCharacterSelect.nameInput
+#define OFFSET_INPUTFIELD_M_TEXT    0x180         // InputField.m_Text
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -171,7 +171,6 @@ static void* get_gta_menu_instance() {
 // ======================== گرفتن GtaCharacterSelect instance ========================
 static void* get_char_select_instance() {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
-        // تلاش مجدد با get_Instance
         g_gtaInstance = get_gta_menu_instance();
         if (g_gtaInstance == nullptr) {
             write_report("❌ Cannot get GtaMenuControl instance!");
@@ -188,7 +187,7 @@ static void* get_char_select_instance() {
     return charSelect;
 }
 
-// ======================== گرفتن اسم کاربر ========================
+// ======================== گرفتن اسم کاربر از nameInput ========================
 static std::string get_player_username() {
     void* charSelect = get_char_select_instance();
     if (charSelect == nullptr) {
@@ -196,13 +195,13 @@ static std::string get_player_username() {
         return "";
     }
     
-    void* usernameStat = *(void**)((uintptr_t)charSelect + OFFSET_CHAR_USERNAME);
-    if (usernameStat == nullptr || !is_valid_address(usernameStat)) {
-        write_report("❌ usernameStat is null!");
+    void* nameInput = *(void**)((uintptr_t)charSelect + OFFSET_CHAR_NAME_INPUT);
+    if (nameInput == nullptr || !is_valid_address(nameInput)) {
+        write_report("❌ nameInput is null!");
         return "";
     }
     
-    void** mTextPtr = (void**)((uintptr_t)usernameStat + OFFSET_TEXT_M_TEXT);
+    void** mTextPtr = (void**)((uintptr_t)nameInput + OFFSET_INPUTFIELD_M_TEXT);
     if (mTextPtr == nullptr || !is_valid_address(mTextPtr)) {
         write_report("❌ m_Text pointer is invalid!");
         return "";
@@ -257,7 +256,7 @@ static void get_player_info() {
         }
         write_report("✅ Using GtaMenuControl instance: 0x" + std::to_string((uintptr_t)g_gtaInstance));
         
-        // گرفتن اسم
+        // گرفتن اسم از nameInput
         std::string username = get_player_username();
         if (username.empty()) {
             write_report("⚠️ Username is empty!");
@@ -280,12 +279,6 @@ static void get_player_info() {
         write_player_info("✅ " + result);
         write_player_info("========== DONE ==========\n");
         write_result("✅ " + result);
-        
-        // نمایش با Toast (از طریق JNI)
-        std::string toastMsg = "Username: " + username + "\nCharacter ID: " + std::to_string(charId);
-        
-        // از تابع Toast در Jni.hpp استفاده میکنیم
-        // اینجا باید env داشته باشیم، ولی از Changes میاد
         
     } catch (const std::exception& e) {
         write_report("❌ Exception: " + std::string(e.what()));
@@ -316,7 +309,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     
     const char *features[] = {
         OBFUSCATE("Category_👤 Player Info"),
-        OBFUSCATE("Button_Get Player Info (Username + Character ID)"),
+        OBFUSCATE("Button_Get Player Info"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/player_info.txt"),
     };
     
@@ -344,37 +337,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         case 0:  // دکمه Get Player Info
             write_report("\n🔘 Get Player Info button pressed");
             write_result("🔘 Get Player Info button pressed");
-            
-            // گرفتن اطلاعات
             get_player_info();
-            
-            // نمایش Toast
-            if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
-                std::string username = get_player_username();
-                int charId = get_player_character_id();
-                
-                std::string toastMsg = "Username: " + (username.empty() ? "(empty)" : username) + 
-                                      "\nCharacter ID: " + (charId < 0 ? "unknown" : std::to_string(charId));
-                
-                // Toast از طریق JNI
-                jclass toastClass = env->FindClass("android/widget/Toast");
-                jmethodID makeText = env->GetStaticMethodID(toastClass, "makeText", 
-                    "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
-                jmethodID show = env->GetMethodID(toastClass, "show", "()V");
-                
-                // پیدا کردن context
-                jclass contextClass = env->FindClass("android/app/ActivityThread");
-                jmethodID currentActivityThread = env->GetStaticMethodID(contextClass, 
-                    "currentActivityThread", "()Landroid/app/ActivityThread;");
-                jobject activityThread = env->CallStaticObjectMethod(contextClass, currentActivityThread);
-                jmethodID getApplication = env->GetMethodID(contextClass, "getApplication", "()Landroid/app/Application;");
-                jobject context = env->CallObjectMethod(activityThread, getApplication);
-                
-                jstring jMsg = env->NewStringUTF(toastMsg.c_str());
-                jobject toast = env->CallStaticObjectMethod(toastClass, makeText, context, jMsg, 1);
-                env->CallVoidMethod(toast, show);
-                env->DeleteLocalRef(jMsg);
-            }
             break;
             
         default:
