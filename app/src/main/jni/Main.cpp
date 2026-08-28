@@ -20,11 +20,9 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (از دامپ) ========================
-#define OFFSET_NETWORK_ADDR     0x50          // CustomNetworkManager.networkAddress
-#define OFFSET_START_CLIENT     0x1AACCB4     // CustomNetworkManager.StartClient()
-#define OFFSET_START_HOST       0x1AADC24     // CustomNetworkManager.StartHost()
+// ======================== آفست‌ها ========================
 #define OFFSET_GTA_MENU_START   0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_NETWORK_ADDR     0x50          // Mirror.NetworkManager.networkAddress
 
 // ======================== IP پیش‌فرض ========================
 #define DEFAULT_IP "5.57.37.224"
@@ -41,8 +39,6 @@ static std::string g_reportLog = g_basePath + "full_report.txt";
 // ======================== متغیرها ========================
 static std::string g_targetIP = "";
 static bool g_crashHandlerInstalled = false;
-static void* g_gtaMenuInstance = nullptr;
-static bool g_gtaMenuReady = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -131,22 +127,17 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== هوک ========================
+// ======================== هوک روی GtaMenuControl.Start (اختیاری) ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     write_report("========== GtaMenuControl.Start() HOOKED ==========");
     write_report("Time: " + get_time());
-    
     if (instance != nullptr) {
-        g_gtaMenuInstance = instance;
-        g_gtaMenuReady = true;
-        write_report("✅ GtaMenuControl instance saved: 0x" + std::to_string((uintptr_t)instance));
-        write_debug("✅ GtaMenuControl instance saved");
+        write_report("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
     } else {
         write_report("❌ instance is null!");
     }
     write_report("====================================================\n");
-    
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
     }
@@ -158,47 +149,42 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
     write_report("Time: " + get_time());
     write_report("Target IP: " + g_targetIP);
 
-    if (env == nullptr || obj == nullptr) {
-        write_report("❌ env or obj is null!");
+    if (env == nullptr) {
+        write_report("❌ JNIEnv is null!");
         return;
     }
 
     try {
+        // بارگذاری IP
         if (g_targetIP.empty()) {
             g_targetIP = load_ip();
             if (g_targetIP.empty()) {
-                write_report("📌 No IP found, using default: " DEFAULT_IP ":" DEFAULT_PORT);
+                write_report("📌 No saved IP, using default: " DEFAULT_IP ":" DEFAULT_PORT);
                 g_targetIP = DEFAULT_IP ":" DEFAULT_PORT;
                 save_ip(g_targetIP);
+            } else {
+                write_report("📌 Loaded IP from file: " + g_targetIP);
             }
         }
 
-        // ====== پیدا کردن NetworkManager ======
-        write_report("Step 1: Finding NetworkManager...");
-        
-        const char* classNames[] = {
-            "CustomNetworkManager",
-            "NetworkManager"
-        };
-        
-        jclass nmClass = nullptr;
-        for (int i = 0; i < 2 && nmClass == nullptr; i++) {
-            nmClass = env->FindClass(classNames[i]);
+        // ====== پیدا کردن Mirror.NetworkManager ======
+        write_report("Step 1: Finding Mirror.NetworkManager...");
+        jclass nmClass = env->FindClass("Mirror.NetworkManager");
+        if (nmClass == nullptr) {
+            env->ExceptionClear();
+            write_report("⚠️ Mirror.NetworkManager not found, trying NetworkManager...");
+            nmClass = env->FindClass("NetworkManager");
             if (nmClass == nullptr) {
                 env->ExceptionClear();
-                write_report("   ❌ " + std::string(classNames[i]) + " not found");
-            } else {
-                write_report("   ✅ Found: " + std::string(classNames[i]));
+                write_report("❌ NetworkManager class not found!");
+                write_log(g_ipResultLog, "❌ NetworkManager class not found!");
+                return;
             }
         }
+        write_report("✅ NetworkManager class found");
 
-        if (nmClass == nullptr) {
-            write_report("❌ NetworkManager class not found!");
-            write_log(g_ipResultLog, "❌ NetworkManager class not found!");
-            return;
-        }
-
-        jclass objClass = env->FindClass("UnityEngine/Object");
+        // ====== پیدا کردن UnityEngine.Object ======
+        jclass objClass = env->FindClass("UnityEngine.Object");
         if (objClass == nullptr) {
             env->ExceptionClear();
             write_report("❌ UnityEngine.Object class not found!");
@@ -214,6 +200,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
             return;
         }
 
+        // ====== پیدا کردن instance ======
         jobject nm = env->CallStaticObjectMethod(objClass, findObj, nmClass);
         if (nm == nullptr) {
             write_report("❌ NetworkManager instance not found!");
@@ -222,7 +209,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         }
         write_report("✅ NetworkManager instance found: 0x" + std::to_string((uintptr_t)nm));
 
-        // ====== تغییر networkAddress ======
+        // ====== تغییر networkAddress (آفست 0x50) ======
         write_report("Step 2: Setting networkAddress...");
         jfieldID addrField = env->GetFieldID(nmClass, "networkAddress", "Ljava/lang/String;");
         if (addrField == nullptr) {
@@ -244,7 +231,7 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
         write_report("✅ networkAddress set to: " + g_targetIP);
         write_log(g_ipResultLog, "✅ networkAddress set to: " + g_targetIP);
 
-        // ====== StartClient ======
+        // ====== صدا زدن StartClient ======
         write_report("Step 3: Calling StartClient...");
         jmethodID startClient = env->GetMethodID(nmClass, "StartClient", "()V");
         if (startClient == nullptr) {
@@ -291,8 +278,8 @@ static void connect_to_server(JNIEnv* env, jobject obj) {
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_🌐 Network Tools"),
-        OBFUSCATE("InputText_Enter IP"),           // featNum: 0
+        OBFUSCATE("Category_🌐 Network"),
+        OBFUSCATE("InputText_IP"),                 // featNum: 0
         OBFUSCATE("Button_Connect"),               // featNum: 1
         OBFUSCATE("Button_Show IP"),               // featNum: 2
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
@@ -375,7 +362,7 @@ void hack_thread() {
     write_report("✅ libil2cpp.so loaded successfully");
     write_debug("✅ " + std::string(libName) + " loaded!");
 
-    // ====== هوک روی GtaMenuControl.Start ======
+    // ====== هوک روی GtaMenuControl.Start (اختیاری) ======
 #if defined(__aarch64__)
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr) {
@@ -393,7 +380,7 @@ void hack_thread() {
     }
 #endif
 
-    // ====== IP ======
+    // ====== بارگذاری IP ======
     g_targetIP = load_ip();
     if (g_targetIP.empty()) {
         write_report("📌 No saved IP found, using default: " DEFAULT_IP ":" DEFAULT_PORT);
