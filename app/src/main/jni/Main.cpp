@@ -307,13 +307,13 @@ static void load_config() {
     }
 }
 
-// ======================== منو (نسخه اصلاح‌شده با تعداد عناصر ثابت) ========================
+// ======================== منو (ساده، فقط ۴ دکمه) ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     load_config();
     
-    // ====== تعداد عناصر منو ======
-    // 1 Category + 30 CheckBox + 1 Category + 3 Button + 1 RichTextView = 36
-    const int totalFeatures = 1 + MAX_BUTTONS + 1 + 3 + 1;
+    // ====== تعداد المان‌ها ======
+    // 1 Category + 4 Button = 5
+    const int totalFeatures = 5;
     
     jobjectArray ret = (jobjectArray)env->NewObjectArray(
         totalFeatures,
@@ -326,30 +326,12 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         return nullptr;
     }
     
-    int index = 0;
-    
-    // Category
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Manager (0-29)")));
-    
-    // 30 CheckBox
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        std::string label = "CheckBox_Index " + std::to_string(i);
-        if (g_disableState[i]) {
-            label = "True_" + label;
-        }
-        env->SetObjectArrayElement(ret, index++, env->NewStringUTF(label.c_str()));
-    }
-    
-    // Category خالی
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Category_")));
-    
-    // 3 دکمه
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Apply Selected")));
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Enable All")));
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("Button_Extract & Save")));
-    
-    // RichTextView
-    env->SetObjectArrayElement(ret, index++, env->NewStringUTF(OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/")));
+    int idx = 0;
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Category_🔘 Button Manager")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Apply Selected")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Enable All")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("Button_Extract & Save")));
+    env->SetObjectArrayElement(ret, idx++, env->NewStringUTF(OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/")));
     
     write_report("✅ GetFeatureList returned " + std::to_string(totalFeatures) + " features");
     return ret;
@@ -359,24 +341,17 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
-    // featNum 0-29 = CheckBox ایندکس
-    if (featNum >= 0 && featNum < MAX_BUTTONS) {
-        g_disableState[featNum] = boolean;
-        write_report("   " + std::to_string(featNum) + " -> " + (boolean ? "ON" : "OFF"));
-        return;
-    }
-    
-    // 30 = Apply, 31 = Enable All, 32 = Extract & Save
+    // 0 = Apply, 1 = Enable All, 2 = Extract & Save
     switch (featNum) {
-        case 30:
+        case 0:
             write_report("🔘 Apply Selected pressed");
             apply_disabled();
             break;
-        case 31:
+        case 1:
             write_report("🔘 Enable All pressed");
             enable_all();
             break;
-        case 32:
+        case 2:
             write_report("🔘 Extract & Save pressed");
             save_config();
             break;
