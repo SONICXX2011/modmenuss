@@ -24,9 +24,13 @@
 #define DEFAULT_PORT "9876"
 
 // ======================== آفست‌ها (همه از دامپ) ========================
+#define OFFSET_GET_INSTANCE         0xF570C4      // GtaMenuControl.get_Instance()
+#define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
+#define OFFSET_IP_INPUT             0xC0          // GtaMenuControl.ipInput
+#define OFFSET_INPUTFIELD_M_TEXT    0x180         // InputField.m_Text
+#define OFFSET_NETWORK_MANAGER      0x258         // GtaMenuControl._networkManager
 #define OFFSET_NETWORK_ADDR         0x50          // NetworkManager.networkAddress
 #define OFFSET_START_CLIENT         0x1AACCB4     // NetworkManager.StartClient()
-#define OFFSET_START_HOST           0x1AADC24     // NetworkManager.StartHost()
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -37,6 +41,9 @@ static std::string g_reportLog = g_basePath + "full_report.txt";
 static std::string g_connectLog = g_basePath + "connect_log.txt";
 
 static bool g_crashHandlerInstalled = false;
+static void* g_gtaInstance = nullptr;
+static void* g_networkManagerInstance = nullptr;
+static bool g_gtaReady = false;
 static std::string g_targetIP = "";
 
 // ======================== توابع کمکی ========================
@@ -145,128 +152,193 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== پیدا کردن CustomNetworkManager با JNI ========================
-static void* find_custom_network_manager(JNIEnv* env) {
-    if (env == nullptr) {
-        write_connect_log("❌ JNIEnv is null!");
-        return nullptr;
-    }
+// ======================== تبدیل MonoString به std::string ========================
+static std::string mono_string_to_utf8(void* monoString) {
+    if (monoString == nullptr) return "";
+    if (!is_valid_address(monoString)) return "";
     
-    write_connect_log("🔍 Searching for CustomNetworkManager...");
+    typedef int32_t (*il2cpp_string_length_t)(void* str);
+    il2cpp_string_length_t il2cpp_string_length = 
+        (il2cpp_string_length_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
+    if (il2cpp_string_length == nullptr) return "";
     
-    try {
-        // روش 1: FindObjectOfType از UnityEngine.Object
-        jclass objClass = env->FindClass("UnityEngine/Object");
-        if (objClass == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ UnityEngine.Object class not found");
-            return nullptr;
-        }
-        write_connect_log("✅ UnityEngine.Object class found");
-        
-        jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
-        if (findObj == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ FindObjectOfType method not found");
-            env->DeleteLocalRef(objClass);
-            return nullptr;
-        }
-        write_connect_log("✅ FindObjectOfType method found");
-        
-        // پیدا کردن کلاس CustomNetworkManager
-        jclass nmClass = env->FindClass("CustomNetworkManager");
-        if (nmClass == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ CustomNetworkManager class not found, trying NetworkManager...");
-            nmClass = env->FindClass("NetworkManager");
-            if (nmClass == nullptr) {
-                env->ExceptionClear();
-                write_connect_log("❌ NetworkManager class not found!");
-                env->DeleteLocalRef(objClass);
-                return nullptr;
-            }
-        }
-        write_connect_log("✅ CustomNetworkManager/NetworkManager class found");
-        
-        // صدا زدن FindObjectOfType
-        jobject nmObj = env->CallStaticObjectMethod(objClass, findObj, nmClass);
-        env->DeleteLocalRef(objClass);
-        env->DeleteLocalRef(nmClass);
-        
-        if (nmObj == nullptr) {
-            write_connect_log("❌ CustomNetworkManager instance not found!");
-            return nullptr;
-        }
-        
-        void* nmInstance = (void*)nmObj;
-        write_connect_log("✅ CustomNetworkManager instance: 0x" + std::to_string((uintptr_t)nmInstance));
-        return nmInstance;
-        
-    } catch (const std::exception& e) {
-        write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
-        return nullptr;
-    } catch (...) {
-        write_connect_log("❌ Unknown exception!");
-        write_crash("⚠️ Unknown exception!");
-        return nullptr;
+    int length = il2cpp_string_length(monoString);
+    if (length <= 0 || length > 65536) return "";
+    
+    typedef uint16_t* (*il2cpp_string_chars_t)(void* str);
+    il2cpp_string_chars_t il2cpp_string_chars = 
+        (il2cpp_string_chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
+    if (il2cpp_string_chars == nullptr) return "";
+    
+    uint16_t* chars = il2cpp_string_chars(monoString);
+    if (chars == nullptr) return "";
+    
+    std::string result;
+    result.reserve(length);
+    for (int i = 0; i < length; i++) {
+        result += (char)(chars[i] & 0xFF);
     }
+    return result;
 }
 
-// ======================== پیدا کردن CustomNetworkManager با KittyMemory ========================
-static void* find_custom_network_manager_memory() {
-    write_connect_log("🔍 Searching for CustomNetworkManager in memory...");
+// ======================== ساخت MonoString جدید ========================
+static void* create_mono_string(const char* str) {
+    if (str == nullptr) return nullptr;
     
-    auto maps = KittyMemory::getAllMaps();
-    for (auto &map : maps) {
-        if (!map.readable) continue;
-        // جستجوی الگوی CustomNetworkManager
-        uintptr_t found = KittyScanner::findDataFirst(map.startAddress, map.endAddress, "CustomNetworkManager", strlen("CustomNetworkManager"));
-        if (found != 0) {
-            write_connect_log("✅ Found 'CustomNetworkManager' string at: 0x" + std::to_string(found));
-            // پیدا کردن instance نزدیک آن (معمولاً در 0x20-0x100 بعد از string)
-            for (uintptr_t addr = found - 0x100; addr < found + 0x100; addr += 8) {
-                void* potential = *(void**)addr;
-                if (potential != nullptr && is_valid_address(potential)) {
-                    // امتحان کردن با جستجوی اسم کلاس
-                    // اینجا نمیتونیم بفهمیم دقیقاً CustomNetworkManager هست یا نه
-                    // پس بهتره از این روش صرف نظر کنیم
-                }
-            }
-        }
+    typedef void* (*il2cpp_string_new_t)(const char*);
+    il2cpp_string_new_t il2cpp_string_new = 
+        (il2cpp_string_new_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_new");
+    if (il2cpp_string_new == nullptr) {
+        write_connect_log("❌ il2cpp_string_new not found");
+        return nullptr;
     }
+    
+    return il2cpp_string_new(str);
+}
+
+// ======================== گرفتن GtaMenuControl instance ========================
+static void* get_gta_instance() {
+    if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
+        return g_gtaInstance;
+    }
+    
+    typedef void* (*get_instance_t)();
+    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
+    if (get_Instance == nullptr) {
+        write_connect_log("❌ GtaMenuControl.get_Instance not found");
+        return nullptr;
+    }
+    
+    void* instance = get_Instance();
+    if (instance != nullptr && is_valid_address(instance)) {
+        g_gtaInstance = instance;
+        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
+        return instance;
+    }
+    
     return nullptr;
 }
 
-// ======================== اتصال به سرور با CustomNetworkManager ========================
-static void connect_to_server(JNIEnv* env) {
+// ======================== گرفتن IP از ipInput ========================
+static std::string get_ip_from_input() {
+    void* instance = get_gta_instance();
+    if (instance == nullptr) {
+        write_connect_log("❌ Cannot get GtaMenuControl instance for IP");
+        return "";
+    }
+    
+    void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
+    if (ipInput == nullptr || !is_valid_address(ipInput)) {
+        write_connect_log("❌ ipInput is null or invalid");
+        return "";
+    }
+    
+    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
+    if (mTextPtr == nullptr || !is_valid_address(mTextPtr)) {
+        write_connect_log("❌ m_Text pointer invalid");
+        return "";
+    }
+    
+    void* monoString = *mTextPtr;
+    if (monoString == nullptr) {
+        write_connect_log("❌ MonoString is null");
+        return "";
+    }
+    
+    return mono_string_to_utf8(monoString);
+}
+
+// ======================== تزریق IP به ipInput ========================
+static void inject_ip_to_input(const std::string& ip) {
+    void* instance = get_gta_instance();
+    if (instance == nullptr) {
+        write_report("❌ Cannot get instance for IP injection");
+        return;
+    }
+    
+    void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
+    if (ipInput == nullptr || !is_valid_address(ipInput)) {
+        write_report("❌ ipInput is null");
+        return;
+    }
+    
+    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
+    if (mTextPtr == nullptr) {
+        write_report("❌ m_Text pointer invalid");
+        return;
+    }
+    
+    void* monoString = create_mono_string(ip.c_str());
+    if (monoString == nullptr) {
+        write_report("❌ Failed to create mono string");
+        return;
+    }
+    
+    *mTextPtr = monoString;
+    write_report("✅ IP injected: " + ip);
+    write_result("✅ IP injected: " + ip);
+}
+
+// ======================== گرفتن NetworkManager instance ========================
+static void* get_network_manager_instance() {
+    if (g_networkManagerInstance != nullptr && is_valid_address(g_networkManagerInstance)) {
+        return g_networkManagerInstance;
+    }
+    
+    void* gtaInstance = get_gta_instance();
+    if (gtaInstance == nullptr) {
+        write_connect_log("❌ Cannot get GtaMenuControl instance for NetworkManager");
+        return nullptr;
+    }
+    
+    void* nmInstance = *(void**)((uintptr_t)gtaInstance + OFFSET_NETWORK_MANAGER);
+    if (nmInstance == nullptr || !is_valid_address(nmInstance)) {
+        write_connect_log("❌ NetworkManager instance is null or invalid");
+        return nullptr;
+    }
+    
+    g_networkManagerInstance = nmInstance;
+    write_connect_log("✅ NetworkManager instance: 0x" + std::to_string((uintptr_t)nmInstance));
+    return nmInstance;
+}
+
+// ======================== اتصال به سرور ========================
+static void connect_to_server() {
     write_connect_log("\n========== CONNECTING TO SERVER ==========");
     write_connect_log("Time: " + get_time());
     write_report("🔘 Connect button pressed");
     write_result("🔘 Connect button pressed");
     
     try {
-        // 1. بارگذاری IP
-        if (g_targetIP.empty()) {
-            g_targetIP = load_ip();
-            if (g_targetIP.empty()) {
-                g_targetIP = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
-                save_ip(g_targetIP);
-                write_connect_log("📌 Using default IP: " + g_targetIP);
+        // 1. گرفتن IP (از ipInput یا فایل یا پیش‌فرض)
+        std::string ip = get_ip_from_input();
+        if (ip.empty()) {
+            ip = load_ip();
+            if (ip.empty()) {
+                ip = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
+                save_ip(ip);
+                write_connect_log("📌 Using default IP: " + ip);
+            } else {
+                inject_ip_to_input(ip);
+                write_connect_log("📌 Loaded IP from file: " + ip);
             }
+        } else {
+            save_ip(ip);
+            write_connect_log("📌 IP from input: " + ip);
         }
-        write_connect_log("📡 Target IP: " + g_targetIP);
-        write_report("📡 Target IP: " + g_targetIP);
+        g_targetIP = ip;
+        write_connect_log("📡 Target IP: " + ip);
+        write_report("📡 Target IP: " + ip);
         
-        // 2. پیدا کردن CustomNetworkManager
-        void* nmInstance = find_custom_network_manager(env);
-        if (nmInstance == nullptr) {
-            write_connect_log("❌ CustomNetworkManager not found!");
-            write_report("❌ CustomNetworkManager not found!");
-            write_result("❌ CustomNetworkManager not found!");
+        // 2. گرفتن NetworkManager
+        void* nmInstance = get_network_manager_instance();
+        if (nmInstance == nullptr || !is_valid_address(nmInstance)) {
+            write_connect_log("❌ NetworkManager instance not found!");
+            write_report("❌ NetworkManager not found!");
+            write_result("❌ NetworkManager not found!");
             return;
         }
-        write_connect_log("✅ CustomNetworkManager instance: 0x" + std::to_string((uintptr_t)nmInstance));
+        write_connect_log("✅ NetworkManager instance: 0x" + std::to_string((uintptr_t)nmInstance));
         
         // 3. تنظیم networkAddress
         void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
@@ -276,29 +348,21 @@ static void connect_to_server(JNIEnv* env) {
             return;
         }
         
-        typedef void* (*il2cpp_string_new_t)(const char*);
-        il2cpp_string_new_t il2cpp_string_new = 
-            (il2cpp_string_new_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_new");
-        if (il2cpp_string_new == nullptr) {
-            write_connect_log("❌ il2cpp_string_new not found");
-            return;
-        }
-        
-        void* monoString = il2cpp_string_new(g_targetIP.c_str());
+        void* monoString = create_mono_string(ip.c_str());
         if (monoString == nullptr) {
             write_connect_log("❌ Failed to create mono string");
             return;
         }
         
         *nmAddrPtr = monoString;
-        write_connect_log("✅ networkAddress set to: " + g_targetIP);
-        write_report("✅ networkAddress set to: " + g_targetIP);
+        write_connect_log("✅ networkAddress set to: " + ip);
+        write_report("✅ networkAddress set to: " + ip);
         
         // 4. صدا زدن StartClient
         void* startClientAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1AACCB4"));
         if (startClientAddr == nullptr || !is_valid_address(startClientAddr)) {
             write_connect_log("❌ StartClient address not found!");
-            write_report("❌ StartClient address not found!");
+            write_report("❌ StartClient not found!");
             write_result("❌ StartClient not found!");
             return;
         }
@@ -315,6 +379,9 @@ static void connect_to_server(JNIEnv* env) {
         write_report("✅ StartClient() called successfully!");
         write_result("✅ Connecting...");
         
+        // 5. لاگ موفقیت
+        write_connect_log("✅ Connection initiated. Check game for connecting status.");
+        
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
         write_report("❌ Exception: " + std::string(e.what()));
@@ -325,6 +392,20 @@ static void connect_to_server(JNIEnv* env) {
         write_crash("⚠️ Unknown exception!");
     }
     write_connect_log("========== CONNECT FINISHED ==========\n");
+}
+
+// ======================== هوک GtaMenuControl.Start (برای گرفتن instance) ========================
+void (*orig_GtaMenuStart)(void *instance);
+void hook_GtaMenuStart(void *instance) {
+    if (instance != nullptr && is_valid_address(instance)) {
+        g_gtaInstance = instance;
+        g_gtaReady = true;
+        write_report("✅ Hook captured GtaMenuControl instance");
+        write_connect_log("✅ GtaMenuControl instance captured: 0x" + std::to_string((uintptr_t)instance));
+    }
+    if (orig_GtaMenuStart) {
+        orig_GtaMenuStart(instance);
+    }
 }
 
 // ======================== منو ========================
@@ -369,6 +450,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             if (textStr != nullptr && strlen(textStr) > 0) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
+                inject_ip_to_input(g_targetIP);
                 write_report("📝 IP entered: " + g_targetIP);
                 write_result("📝 IP entered: " + g_targetIP);
             }
@@ -383,14 +465,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
                     g_targetIP = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
                 }
             }
-            // IP رو توی فیلد ذخیره کن (برای Connect)
-            save_ip(g_targetIP);
-            write_result("✅ IP ready: " + g_targetIP);
+            inject_ip_to_input(g_targetIP);
+            write_result("✅ IP injected: " + g_targetIP);
             break;
         }
         
         case 2: {
-            connect_to_server(env);
+            connect_to_server();
             break;
         }
         
@@ -423,7 +504,47 @@ void hack_thread() {
 
     write_report("✅ libil2cpp.so loaded successfully");
 
-    // ====== بارگذاری IP ======
+#if defined(__aarch64__)
+    // ====== نصب هوک روی Start (برای گرفتن instance) ======
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr != nullptr && is_valid_address(startAddr)) {
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_report("✅ GtaMenuControl.Start() hooked at 0x" + std::to_string((uintptr_t)startAddr));
+        } else {
+            write_report("❌ Failed to hook GtaMenuControl.Start()! error: " + std::to_string(res));
+        }
+    } else {
+        write_report("❌ GtaMenuControl.Start() address not found");
+    }
+#endif
+
+    // ====== گرفتن instance ======
+    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) {
+        sleep(1);
+    }
+    
+    if (g_gtaInstance != nullptr) {
+        write_report("✅ Got GtaMenuControl instance after wait");
+        write_connect_log("✅ Got GtaMenuControl instance after wait");
+    } else {
+        g_gtaInstance = get_gta_instance();
+        if (g_gtaInstance != nullptr) {
+            write_report("✅ Got GtaMenuControl instance via get_Instance");
+            write_connect_log("✅ Got GtaMenuControl instance via get_Instance");
+        }
+    }
+
+    // ====== گرفتن NetworkManager ======
+    if (g_gtaInstance != nullptr) {
+        g_networkManagerInstance = get_network_manager_instance();
+        if (g_networkManagerInstance != nullptr) {
+            write_report("✅ Got NetworkManager instance");
+            write_connect_log("✅ Got NetworkManager instance");
+        }
+    }
+
+    // ====== IP پیش‌فرض ======
     g_targetIP = load_ip();
     if (g_targetIP.empty()) {
         g_targetIP = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
@@ -431,6 +552,11 @@ void hack_thread() {
         write_report("📌 Default IP set: " + g_targetIP);
     } else {
         write_report("📌 IP loaded from file: " + g_targetIP);
+    }
+
+    // ====== تزریق خودکار IP (اگه instance آماده باشه) ======
+    if (g_gtaInstance != nullptr) {
+        inject_ip_to_input(g_targetIP);
     }
 
     write_report("✅ hack_thread finished successfully");
