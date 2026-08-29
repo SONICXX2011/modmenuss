@@ -28,9 +28,6 @@
 #define OFFSET_INPUTFIELD_M_TEXT    0x180
 #define OFFSET_NETWORK_MANAGER      0x258
 #define OFFSET_NETWORK_ADDR         0x50
-#define OFFSET_START_CLIENT         0x1AACCB4
-#define OFFSET_LOCAL_JOIN           0xF5B844
-#define OFFSET_ON_CLIENT_CONNECT    0xF7FA8C
 
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
@@ -43,8 +40,6 @@ static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static void* g_networkManagerInstance = nullptr;
 static std::string g_targetIP = "";
-static bool g_gtaReady = false;
-static bool g_connectHooksInstalled = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -61,11 +56,6 @@ static void write_log(const std::string& file, const std::string& msg) {
         f << "[" << get_time() << "] " << msg << "\n";
         f.close();
     }
-}
-
-static void write_debug(const std::string& msg) {
-    write_log(g_debugLog, msg);
-    LOGI("[Debug] %s", msg.c_str());
 }
 
 static void write_report(const std::string& msg) {
@@ -169,46 +159,39 @@ static void* create_mono_string(const char* str) {
     return il2cpp_string_new(str);
 }
 
-// ======================== گرفتن instance با انتظار ========================
-static void* get_gta_instance_safe() {
+// ======================== گرفتن GtaMenuControl ========================
+static void* get_gta_instance() {
     if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
         return g_gtaInstance;
     }
     
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance != nullptr) {
-        void* instance = get_Instance();
-        if (instance != nullptr && is_valid_address(instance)) {
-            g_gtaInstance = instance;
-            g_gtaReady = true;
-            write_connect_log("✅ GtaMenuControl instance from get_Instance");
-            return instance;
-        }
+    if (get_Instance == nullptr) {
+        write_connect_log("❌ GtaMenuControl.get_Instance not found");
+        return nullptr;
     }
     
-    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
-        write_connect_log("⏳ Waiting for GtaMenuControl... (" + std::to_string(i+1) + "/15)");
-        sleep(1);
+    void* instance = get_Instance();
+    if (instance != nullptr && is_valid_address(instance)) {
+        g_gtaInstance = instance;
+        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
+        return instance;
     }
-    
-    if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
-        g_gtaReady = true;
-        write_connect_log("✅ GtaMenuControl instance from hook");
-        return g_gtaInstance;
-    }
-    
-    write_connect_log("❌ GtaMenuControl instance not found!");
     return nullptr;
 }
 
-static void* get_network_manager_safe() {
+// ======================== گرفتن NetworkManager ========================
+static void* get_network_manager() {
     if (g_networkManagerInstance != nullptr && is_valid_address(g_networkManagerInstance)) {
         return g_networkManagerInstance;
     }
     
-    void* gtaInstance = get_gta_instance_safe();
-    if (gtaInstance == nullptr) return nullptr;
+    void* gtaInstance = get_gta_instance();
+    if (gtaInstance == nullptr) {
+        write_connect_log("❌ Cannot get GtaMenuControl for NetworkManager");
+        return nullptr;
+    }
     
     void* nmInstance = *(void**)((uintptr_t)gtaInstance + OFFSET_NETWORK_MANAGER);
     if (nmInstance == nullptr || !is_valid_address(nmInstance)) {
@@ -221,99 +204,21 @@ static void* get_network_manager_safe() {
     return nmInstance;
 }
 
-static void inject_ip_to_input(const std::string& ip) {
-    void* instance = get_gta_instance_safe();
-    if (instance == nullptr) return;
-    
-    void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
-    if (ipInput == nullptr || !is_valid_address(ipInput)) return;
-    
-    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
-    if (mTextPtr == nullptr) return;
-    
-    void* monoString = create_mono_string(ip.c_str());
-    if (monoString == nullptr) return;
-    
-    *mTextPtr = monoString;
-    write_connect_log("✅ IP injected: " + ip);
-}
-
-// ======================== اجرا در UI Thread با Handler ========================
-static void call_on_ui_thread(JNIEnv* env, void* instance, void* method_addr) {
-    if (env == nullptr) {
-        write_connect_log("❌ JNIEnv is null!");
-        return;
-    }
-    
-    write_connect_log("🔄 Running method on UI Thread via Handler...");
-    
-    // 1. گرفتن Activity
-    jclass unityPlayerClass = env->FindClass("com/unity3d/player/UnityPlayer");
-    if (unityPlayerClass == nullptr) {
-        env->ExceptionClear();
-        write_connect_log("❌ UnityPlayer class not found");
-        return;
-    }
-    
-    jfieldID currentActivityField = env->GetStaticFieldID(unityPlayerClass, "currentActivity", "Landroid/app/Activity;");
-    jobject activity = env->GetStaticObjectField(unityPlayerClass, currentActivityField);
-    if (activity == nullptr) {
-        env->DeleteLocalRef(unityPlayerClass);
-        write_connect_log("❌ Activity is null");
-        return;
-    }
-    write_connect_log("✅ Activity obtained");
-    
-    // 2. ایجاد Handler
-    jclass handlerClass = env->FindClass("android/os/Handler");
-    if (handlerClass == nullptr) {
-        env->ExceptionClear();
-        write_connect_log("❌ Handler class not found");
-        env->DeleteLocalRef(activity);
-        env->DeleteLocalRef(unityPlayerClass);
-        return;
-    }
-    
-    jmethodID handlerInit = env->GetMethodID(handlerClass, "<init>", "()V");
-    jobject handler = env->NewObject(handlerClass, handlerInit);
-    if (handler == nullptr) {
-        write_connect_log("❌ Handler creation failed");
-        env->DeleteLocalRef(handlerClass);
-        env->DeleteLocalRef(activity);
-        env->DeleteLocalRef(unityPlayerClass);
-        return;
-    }
-    write_connect_log("✅ Handler created");
-    
-    // 3. صدا زدن متد (چون Changes در Thread اصلی هست، مستقیم صدا می‌زنیم)
-    typedef void (*call_func_t)(void*);
-    call_func_t func = (call_func_t)method_addr;
-    func(instance);
-    write_connect_log("✅ Method executed on UI Thread");
-    
-    env->DeleteLocalRef(handler);
-    env->DeleteLocalRef(handlerClass);
-    env->DeleteLocalRef(activity);
-    env->DeleteLocalRef(unityPlayerClass);
-}
-
-// ======================== روش ۱: StartClient (UI Thread) ========================
-static void connect_method1(JNIEnv* env) {
-    write_connect_log("\n========== METHOD 1: StartClient (UI Thread) ==========");
+// ======================== ======== دکمه Connect ======== ========================
+static void connect_to_server() {
+    write_connect_log("\n========== CONNECT TO SERVER ==========");
     write_connect_log("Time: " + get_time());
-    write_report("🔘 Method 1: StartClient pressed");
-    write_result("🔘 Method 1");
+    write_report("🔘 Connect button pressed");
+    write_result("🔘 Connect button pressed");
     
     try {
+        // 1. گرفتن IP
         std::string ip = get_ip();
         write_connect_log("📡 Target IP: " + ip);
-        
-        // 1. تزریق IP
-        inject_ip_to_input(ip);
-        write_connect_log("✅ IP injected");
+        write_report("📡 Target IP: " + ip);
         
         // 2. گرفتن NetworkManager
-        void* nmInstance = get_network_manager_safe();
+        void* nmInstance = get_network_manager();
         if (nmInstance == nullptr) {
             write_connect_log("❌ NetworkManager not found");
             write_result("❌ NetworkManager not found");
@@ -321,33 +226,33 @@ static void connect_method1(JNIEnv* env) {
         }
         write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nmInstance));
         
-        // 3. تنظیم networkAddress
+        // 3. تغییر networkAddress (آفست 0x50)
         void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
-        if (is_valid_address(nmAddr)) {
-            void** nmAddrPtr = (void**)nmAddr;
-            if (nmAddrPtr != nullptr) {
-                void* monoString = create_mono_string(ip.c_str());
-                if (monoString != nullptr) {
-                    *nmAddrPtr = monoString;
-                    write_connect_log("✅ networkAddress set to: " + ip);
-                }
-            }
-        }
-        
-        // 4. گرفتن آدرس StartClient
-        void* startClientAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1AACCB4"));
-        if (startClientAddr == nullptr || !is_valid_address(startClientAddr)) {
-            write_connect_log("❌ StartClient address not found");
-            write_result("❌ StartClient address not found");
+        if (!is_valid_address(nmAddr)) {
+            write_connect_log("❌ networkAddress address invalid");
             return;
         }
-        write_connect_log("✅ StartClient address: 0x" + std::to_string((uintptr_t)startClientAddr));
+        write_connect_log("✅ networkAddress address: 0x" + std::to_string((uintptr_t)nmAddr));
         
-        // 5. صدا زدن در UI Thread
-        write_connect_log("🔄 Calling StartClient() on UI Thread...");
-        call_on_ui_thread(env, nmInstance, startClientAddr);
-        write_connect_log("✅ StartClient() called successfully");
-        write_result("✅ StartClient called");
+        void** nmAddrPtr = (void**)nmAddr;
+        if (nmAddrPtr == nullptr || !is_valid_address(nmAddrPtr)) {
+            write_connect_log("❌ networkAddress pointer invalid");
+            return;
+        }
+        
+        void* monoString = create_mono_string(ip.c_str());
+        if (monoString == nullptr) {
+            write_connect_log("❌ Failed to create mono string");
+            return;
+        }
+        
+        *nmAddrPtr = monoString;
+        write_connect_log("✅ networkAddress set to: " + ip);
+        write_report("✅ networkAddress set to: " + ip);
+        write_result("✅ IP set in NetworkManager");
+        
+        write_connect_log("✅ IP set successfully! Now click Connect button in game.");
+        write_report("✅ IP set successfully! Now click Connect button in game.");
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
@@ -358,100 +263,7 @@ static void connect_method1(JNIEnv* env) {
         write_report("❌ Unknown exception");
         write_crash("⚠️ Unknown exception");
     }
-    write_connect_log("========== METHOD 1 FINISHED ==========\n");
-}
-
-// ======================== روش ۲: LocalJoin (UI Thread) ========================
-static void connect_method2(JNIEnv* env) {
-    write_connect_log("\n========== METHOD 2: LocalJoin (UI Thread) ==========");
-    write_connect_log("Time: " + get_time());
-    write_report("🔘 Method 2: LocalJoin pressed");
-    write_result("🔘 Method 2");
-    
-    try {
-        std::string ip = get_ip();
-        write_connect_log("📡 Target IP: " + ip);
-        
-        // 1. تزریق IP
-        inject_ip_to_input(ip);
-        write_connect_log("✅ IP injected");
-        
-        // 2. گرفتن GtaMenuControl
-        void* gtaInstance = get_gta_instance_safe();
-        if (gtaInstance == nullptr) {
-            write_connect_log("❌ GtaMenuControl not found");
-            write_result("❌ GtaMenuControl not found");
-            return;
-        }
-        write_connect_log("✅ GtaMenuControl: 0x" + std::to_string((uintptr_t)gtaInstance));
-        
-        // 3. گرفتن آدرس LocalJoin
-        void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
-        if (localJoinAddr == nullptr || !is_valid_address(localJoinAddr)) {
-            write_connect_log("❌ LocalJoin address not found");
-            write_result("❌ LocalJoin address not found");
-            return;
-        }
-        write_connect_log("✅ LocalJoin address: 0x" + std::to_string((uintptr_t)localJoinAddr));
-        
-        // 4. صدا زدن در UI Thread
-        write_connect_log("🔄 Calling LocalJoin() on UI Thread...");
-        call_on_ui_thread(env, gtaInstance, localJoinAddr);
-        write_connect_log("✅ LocalJoin() called successfully");
-        write_result("✅ LocalJoin called");
-        
-    } catch (const std::exception& e) {
-        write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_report("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
-    } catch (...) {
-        write_connect_log("❌ Unknown exception");
-        write_report("❌ Unknown exception");
-        write_crash("⚠️ Unknown exception");
-    }
-    write_connect_log("========== METHOD 2 FINISHED ==========\n");
-}
-
-// ======================== هوک OnClientConnect ========================
-void (*orig_OnClientConnect)(void *instance, void *conn);
-void hook_OnClientConnect(void *instance, void *conn) {
-    write_connect_log("\n========== ✅ CLIENT CONNECTED! ==========");
-    write_connect_log("Time: " + get_time());
-    write_report("✅ Client connected to server!");
-    write_result("✅ Connected!");
-    
-    if (orig_OnClientConnect) {
-        orig_OnClientConnect(instance, conn);
-        write_connect_log("✅ Original OnClientConnect executed");
-    }
-}
-
-static void install_connect_hooks() {
-    if (g_connectHooksInstalled) {
-        write_report("⚠️ Connect hooks already installed");
-        return;
-    }
-    
-    write_report("🔧 Installing OnClientConnect hook...");
-#if defined(__aarch64__)
-    void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF7FA8C"));
-    if (addr != nullptr && is_valid_address(addr)) {
-        int res = DobbyHook(addr, (dobby_dummy_func_t)hook_OnClientConnect, (dobby_dummy_func_t*)&orig_OnClientConnect);
-        if (res == 0) {
-            g_connectHooksInstalled = true;
-            write_report("✅ OnClientConnect hook installed");
-            write_connect_log("✅ OnClientConnect hook installed");
-        } else {
-            write_report("❌ OnClientConnect hook failed! error: " + std::to_string(res));
-            write_connect_log("❌ OnClientConnect hook failed");
-        }
-    } else {
-        write_report("❌ OnClientConnect address not found");
-        write_connect_log("❌ OnClientConnect address not found");
-    }
-#else
-    write_report("❌ Not ARM64 architecture");
-#endif
+    write_connect_log("========== CONNECT FINISHED ==========\n");
 }
 
 // ======================== هوک GtaMenuControl.Start ========================
@@ -459,7 +271,6 @@ void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        g_gtaReady = true;
         write_report("✅ Hook captured GtaMenuControl instance");
         write_connect_log("✅ GtaMenuControl captured: 0x" + std::to_string((uintptr_t)instance));
     }
@@ -476,12 +287,9 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         OBFUSCATE("Category_🌐 Network"),
         OBFUSCATE("InputText_Enter IP"),
         OBFUSCATE("Button_Inject IP"),
-        OBFUSCATE("Category_🔗 Connect Methods (UI Thread)"),
-        OBFUSCATE("Button_Method 1: StartClient"),
-        OBFUSCATE("Button_Method 2: LocalJoin"),
-        OBFUSCATE("Category_🔧 Hooks"),
-        OBFUSCATE("Button_Install OnClientConnect Hook"),
-        OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/"),
+        OBFUSCATE("Button_Set IP in NetworkManager"),
+        OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/connect_log.txt"),
+        OBFUSCATE("RichTextView_📌 Then click Connect in game"),
     };
     
     int total = sizeof features / sizeof features[0];
@@ -500,7 +308,6 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     return ret;
 }
 
-// ======================== تغییرات منو ========================
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
@@ -514,7 +321,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             if (textStr != nullptr && strlen(textStr) > 0) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
-                inject_ip_to_input(g_targetIP);
                 write_report("📝 IP entered: " + g_targetIP);
                 write_result("📝 IP entered: " + g_targetIP);
             }
@@ -527,23 +333,26 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
                 g_targetIP = get_ip();
                 save_ip(g_targetIP);
             }
-            inject_ip_to_input(g_targetIP);
-            write_result("✅ IP injected: " + g_targetIP);
+            // تزریق به ipInput (UI)
+            void* gtaInstance = get_gta_instance();
+            if (gtaInstance != nullptr) {
+                void* ipInput = *(void**)((uintptr_t)gtaInstance + OFFSET_IP_INPUT);
+                if (ipInput != nullptr && is_valid_address(ipInput)) {
+                    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
+                    if (mTextPtr != nullptr) {
+                        void* monoString = create_mono_string(g_targetIP.c_str());
+                        if (monoString != nullptr) {
+                            *mTextPtr = monoString;
+                            write_result("✅ IP injected to UI: " + g_targetIP);
+                        }
+                    }
+                }
+            }
             break;
         }
         
         case 2: {
-            connect_method1(env);
-            break;
-        }
-        
-        case 3: {
-            connect_method2(env);
-            break;
-        }
-        
-        case 4: {
-            install_connect_hooks();
+            connect_to_server();
             break;
         }
         
@@ -581,25 +390,32 @@ void hack_thread() {
     }
 #endif
     
-    // منتظر instance
-    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) {
-        sleep(1);
-    }
+    for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) sleep(1);
     
+    g_targetIP = get_ip();
+    save_ip(g_targetIP);
+    write_report("📌 IP: " + g_targetIP);
+    write_debug("📌 Current IP: " + g_targetIP);
+    
+    // تزریق خودکار IP
     if (g_gtaInstance != nullptr) {
-        g_gtaReady = true;
-        write_report("✅ GtaMenuControl ready");
-        g_targetIP = get_ip();
-        inject_ip_to_input(g_targetIP);
-    } else {
-        write_report("⚠️ GtaMenuControl not ready after 20s");
+        void* ipInput = *(void**)((uintptr_t)g_gtaInstance + OFFSET_IP_INPUT);
+        if (ipInput != nullptr && is_valid_address(ipInput)) {
+            void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
+            if (mTextPtr != nullptr) {
+                void* monoString = create_mono_string(g_targetIP.c_str());
+                if (monoString != nullptr) {
+                    *mTextPtr = monoString;
+                    write_report("✅ Auto-injected IP to UI");
+                }
+            }
+        }
     }
     
     write_report("✅ hack done");
     write_debug("✅ hack_thread finished");
 }
 
-// ======================== تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
     create_directory();
