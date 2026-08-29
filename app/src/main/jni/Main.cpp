@@ -28,6 +28,11 @@
 #define OFFSET_CHAR_CURRENT         0x38          // GtaCharacterSelect.currentChar
 #define OFFSET_CHAR_NAME_INPUT      0x48          // GtaCharacterSelect.nameInput
 #define OFFSET_INPUTFIELD_M_TEXT    0x180         // InputField.m_Text
+#define OFFSET_LOCAL_JOIN           0xF5B844      // GtaMenuControl.LocalJoin()
+#define OFFSET_LOCAL_HOST           0xF5B7E0      // GtaMenuControl.LocalHost()
+#define OFFSET_IP_INPUT             0xC0          // GtaMenuControl.ipInput
+#define OFFSET_NETWORK_ADDR         0x50          // NetworkManager.networkAddress
+#define OFFSET_START_CLIENT         0x1AACCB4     // NetworkManager.StartClient()
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -36,11 +41,17 @@ static std::string g_ipResultLog = g_basePath + "ip_result.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_reportLog = g_basePath + "full_report.txt";
 static std::string g_playerInfoLog = g_basePath + "player_info.txt";
+static std::string g_connectLog = g_basePath + "connect_log.txt";
+static std::string g_hookLog = g_basePath + "hook_log.txt";
+static std::string g_callLog = g_basePath + "call_log.txt";
+static std::string g_networkLog = g_basePath + "network_log.txt";
 
 // ======================== متغیرها ========================
 static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_gtaReady = false;
+static bool g_hookInstalled = false;
+static bool g_isConnecting = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -74,6 +85,22 @@ static void write_result(const std::string& msg) {
 
 static void write_player_info(const std::string& msg) {
     write_log(g_playerInfoLog, msg);
+}
+
+static void write_connect_log(const std::string& msg) {
+    write_log(g_connectLog, msg);
+}
+
+static void write_hook_log(const std::string& msg) {
+    write_log(g_hookLog, msg);
+}
+
+static void write_call_log(const std::string& msg) {
+    write_log(g_callLog, msg);
+}
+
+static void write_network_log(const std::string& msg) {
+    write_log(g_networkLog, msg);
 }
 
 static void create_directory() {
@@ -129,12 +156,11 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== تبدیل MonoString به std::string (با توابع IL2CPP) ========================
+// ======================== تبدیل MonoString به std::string ========================
 static std::string mono_string_to_utf8(void* monoString) {
     if (monoString == nullptr) return "";
     if (!is_valid_address(monoString)) return "";
     
-    // ====== il2cpp_string_length ======
     typedef int32_t (*il2cpp_string_length_t)(void* str);
     il2cpp_string_length_t il2cpp_string_length = 
         (il2cpp_string_length_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
@@ -150,7 +176,6 @@ static std::string mono_string_to_utf8(void* monoString) {
         return "";
     }
     
-    // ====== il2cpp_string_chars ======
     typedef uint16_t* (*il2cpp_string_chars_t)(void* str);
     il2cpp_string_chars_t il2cpp_string_chars = 
         (il2cpp_string_chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
@@ -194,40 +219,23 @@ static void* get_gta_menu_instance() {
     return nullptr;
 }
 
-// ======================== گرفتن GtaCharacterSelect instance ========================
-static void* get_char_select_instance() {
+// ======================== گرفتن IP از ipInput ========================
+static std::string get_ip_from_input() {
     if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
         g_gtaInstance = get_gta_menu_instance();
         if (g_gtaInstance == nullptr) {
             write_report("❌ Cannot get GtaMenuControl instance!");
-            return nullptr;
+            return "";
         }
     }
     
-    void* charSelect = *(void**)((uintptr_t)g_gtaInstance + OFFSET_GTA_CHAR_SELECT);
-    if (charSelect == nullptr || !is_valid_address(charSelect)) {
-        write_report("❌ GtaCharacterSelect is null!");
-        return nullptr;
-    }
-    
-    return charSelect;
-}
-
-// ======================== گرفتن اسم کاربر از nameInput ========================
-static std::string get_player_username() {
-    void* charSelect = get_char_select_instance();
-    if (charSelect == nullptr) {
-        write_report("❌ Cannot get GtaCharacterSelect instance!");
+    void* ipInput = *(void**)((uintptr_t)g_gtaInstance + OFFSET_IP_INPUT);
+    if (ipInput == nullptr || !is_valid_address(ipInput)) {
+        write_report("❌ ipInput is null!");
         return "";
     }
     
-    void* nameInput = *(void**)((uintptr_t)charSelect + OFFSET_CHAR_NAME_INPUT);
-    if (nameInput == nullptr || !is_valid_address(nameInput)) {
-        write_report("❌ nameInput is null!");
-        return "";
-    }
-    
-    void** mTextPtr = (void**)((uintptr_t)nameInput + OFFSET_INPUTFIELD_M_TEXT);
+    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
     if (mTextPtr == nullptr || !is_valid_address(mTextPtr)) {
         write_report("❌ m_Text pointer is invalid!");
         return "";
@@ -239,80 +247,252 @@ static std::string get_player_username() {
         return "";
     }
     
-    std::string username = mono_string_to_utf8(monoString);
-    write_report("   📝 Username: " + username);
-    return username;
+    return mono_string_to_utf8(monoString);
 }
 
-// ======================== گرفتن کاراکتر ID ========================
-static int get_player_character_id() {
-    void* charSelect = get_char_select_instance();
-    if (charSelect == nullptr) {
-        write_report("❌ Cannot get GtaCharacterSelect instance!");
-        return -1;
+// ======================== ======================== متدهای تست ======================== ========================
+
+// ======================== روش 1: هوک روی LocalJoin ========================
+void (*orig_LocalJoin)(void *instance);
+void hook_LocalJoin(void *instance) {
+    std::string currentTime = get_time();
+    std::string ip = get_ip_from_input();
+    
+    // ====== لاگ ======
+    __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", 
+        "🟢 HOOK: LocalJoin() CALLED at %s", currentTime.c_str());
+    
+    std::string logMsg = "🟢 HOOK: LocalJoin() CALLED at " + currentTime + " | IP: " + ip;
+    write_hook_log("========== HOOK TRIGGERED ==========");
+    write_hook_log(logMsg);
+    write_hook_log("   📡 IP: " + ip);
+    write_report("🟢 [HOOK] LocalJoin called - IP: " + ip);
+    write_connect_log("🟢 [HOOK] LocalJoin called - IP: " + ip);
+    
+    // ====== اجرای تابع اصلی ======
+    if (orig_LocalJoin) {
+        orig_LocalJoin(instance);
+        write_hook_log("   ✅ Original LocalJoin() executed");
+        __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "   ✅ Original LocalJoin executed");
+    } else {
+        write_hook_log("   ❌ orig_LocalJoin is null!");
+        __android_log_print(ANDROID_LOG_ERROR, "LAC_Mod", "   ❌ orig_LocalJoin is null!");
     }
     
-    int* currentCharPtr = (int*)((uintptr_t)charSelect + OFFSET_CHAR_CURRENT);
-    if (currentCharPtr == nullptr || !is_valid_address(currentCharPtr)) {
-        write_report("❌ currentChar pointer is invalid!");
-        return -1;
-    }
-    
-    int charId = *currentCharPtr;
-    write_report("   🎭 Character ID: " + std::to_string(charId));
-    return charId;
+    write_hook_log("========== HOOK FINISHED ==========\n");
 }
 
-// ======================== گرفتن اطلاعات کامل پلیر ========================
-static void get_player_info() {
-    write_report("\n========== GET PLAYER INFO ==========");
-    write_report("Time: " + get_time());
-    write_player_info("\n========== PLAYER INFO ==========");
-    write_player_info("Time: " + get_time());
+// ======================== نصب هوک ========================
+static bool install_hook() {
+    if (g_hookInstalled) {
+        write_report("⚠️ Hook already installed");
+        return true;
+    }
+    
+    write_report("🔧 Installing LocalJoin hook...");
+    
+#if defined(__aarch64__)
+    void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
+    if (localJoinAddr != nullptr && is_valid_address(localJoinAddr)) {
+        int res = DobbyHook(localJoinAddr, (dobby_dummy_func_t)hook_LocalJoin, (dobby_dummy_func_t*)&orig_LocalJoin);
+        if (res == 0) {
+            g_hookInstalled = true;
+            write_report("✅ LocalJoin() hooked at 0x" + std::to_string((uintptr_t)localJoinAddr));
+            write_hook_log("✅ Hook installed successfully at 0x" + std::to_string((uintptr_t)localJoinAddr));
+            __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "✅ LocalJoin hook installed!");
+            return true;
+        } else {
+            write_report("❌ Failed to hook LocalJoin()! error: " + std::to_string(res));
+            write_hook_log("❌ Hook failed! error: " + std::to_string(res));
+            __android_log_print(ANDROID_LOG_ERROR, "LAC_Mod", "❌ LocalJoin hook failed!");
+            return false;
+        }
+    } else {
+        write_report("❌ LocalJoin() address not found!");
+        write_hook_log("❌ LocalJoin() address not found!");
+        __android_log_print(ANDROID_LOG_ERROR, "LAC_Mod", "❌ LocalJoin address not found!");
+        return false;
+    }
+#else
+    write_report("❌ Not ARM64 architecture!");
+    return false;
+#endif
+}
+
+// ======================== روش 2: صدا زدن LocalJoin ========================
+static void call_local_join() {
+    write_report("\n========== CALL LOCALJOIN ==========");
+    write_call_log("========== CALL LOCALJOIN ==========");
+    write_call_log("Time: " + get_time());
     
     try {
-        // گرفتن instance
         if (g_gtaInstance == nullptr || !is_valid_address(g_gtaInstance)) {
             g_gtaInstance = get_gta_menu_instance();
             if (g_gtaInstance == nullptr) {
-                write_report("❌ Failed to get GtaMenuControl instance!");
-                write_result("❌ Failed to get instance!");
+                write_report("❌ Cannot get GtaMenuControl instance!");
+                write_call_log("❌ Cannot get GtaMenuControl instance!");
                 return;
             }
         }
-        write_report("✅ Using GtaMenuControl instance: 0x" + std::to_string((uintptr_t)g_gtaInstance));
         
-        // گرفتن اسم از nameInput
-        std::string username = get_player_username();
-        if (username.empty()) {
-            write_report("⚠️ Username is empty!");
+        std::string ip = get_ip_from_input();
+        write_report("📡 Target IP: " + ip);
+        write_call_log("📡 Target IP: " + ip);
+        
+        typedef void (*local_join_t)(void* instance);
+        local_join_t LocalJoin = (local_join_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.LocalJoin");
+        
+        if (LocalJoin == nullptr) {
+            write_report("❌ LocalJoin function not found!");
+            write_call_log("❌ LocalJoin function not found!");
+            return;
         }
         
-        // گرفتن کاراکتر ID
-        int charId = get_player_character_id();
-        if (charId < 0) {
-            write_report("⚠️ Character ID is invalid!");
-        }
-        
-        // ====== نمایش نتیجه ======
-        std::string result = "👤 Username: " + (username.empty() ? "(empty)" : username) + 
-                            " | 🎭 Character ID: " + (charId < 0 ? "(unknown)" : std::to_string(charId));
-        
-        write_report("✅ " + result);
-        write_report("========== DONE ==========\n");
-        
-        // ذخیره در فایل مخصوص
-        write_player_info("✅ " + result);
-        write_player_info("========== DONE ==========\n");
-        write_result("✅ " + result);
+        write_report("🔄 Calling LocalJoin()...");
+        write_call_log("🔄 Calling LocalJoin()...");
+        LocalJoin(g_gtaInstance);
+        write_report("✅ LocalJoin() called successfully!");
+        write_call_log("✅ LocalJoin() called successfully!");
+        write_connect_log("🟢 [CALL] LocalJoin called - IP: " + ip);
         
     } catch (const std::exception& e) {
         write_report("❌ Exception: " + std::string(e.what()));
-        write_log(g_crashLog, "⚠️ Exception: " + std::string(e.what()));
+        write_call_log("❌ Exception: " + std::string(e.what()));
     } catch (...) {
         write_report("❌ Unknown exception!");
-        write_log(g_crashLog, "⚠️ Unknown exception!");
+        write_call_log("❌ Unknown exception!");
     }
+    
+    write_call_log("========== CALL FINISHED ==========\n");
+}
+
+// ======================== روش 3: اتصال از طریق NetworkManager ========================
+static void connect_via_network_manager(JNIEnv* env) {
+    write_report("\n========== CONNECT VIA NETWORKMANAGER ==========");
+    write_network_log("========== CONNECT VIA NETWORKMANAGER ==========");
+    write_network_log("Time: " + get_time());
+    
+    if (env == nullptr) {
+        write_report("❌ JNIEnv is null!");
+        write_network_log("❌ JNIEnv is null!");
+        return;
+    }
+    
+    try {
+        std::string ip = get_ip_from_input();
+        if (ip.empty()) {
+            write_report("❌ IP is empty!");
+            write_network_log("❌ IP is empty!");
+            return;
+        }
+        write_report("📡 Target IP: " + ip);
+        write_network_log("📡 Target IP: " + ip);
+        
+        // ====== پیدا کردن NetworkManager ======
+        jclass nmClass = env->FindClass("CustomNetworkManager");
+        if (nmClass == nullptr) {
+            env->ExceptionClear();
+            nmClass = env->FindClass("NetworkManager");
+            if (nmClass == nullptr) {
+                env->ExceptionClear();
+                write_report("❌ NetworkManager class not found!");
+                write_network_log("❌ NetworkManager class not found!");
+                return;
+            }
+        }
+        write_report("✅ NetworkManager class found");
+        write_network_log("✅ NetworkManager class found");
+        
+        // ====== پیدا کردن instance ======
+        jclass objClass = env->FindClass("UnityEngine.Object");
+        jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
+        jobject nm = env->CallStaticObjectMethod(objClass, findObj, nmClass);
+        
+        if (nm == nullptr) {
+            write_report("❌ NetworkManager instance not found!");
+            write_network_log("❌ NetworkManager instance not found!");
+            return;
+        }
+        write_report("✅ NetworkManager instance found");
+        write_network_log("✅ NetworkManager instance found");
+        
+        // ====== تغییر networkAddress ======
+        jfieldID addrField = env->GetFieldID(nmClass, "networkAddress", "Ljava/lang/String;");
+        jstring jip = env->NewStringUTF(ip.c_str());
+        env->SetObjectField(nm, addrField, jip);
+        env->DeleteLocalRef(jip);
+        write_report("✅ networkAddress set to: " + ip);
+        write_network_log("✅ networkAddress set to: " + ip);
+        
+        // ====== StartClient ======
+        jmethodID startClient = env->GetMethodID(nmClass, "StartClient", "()V");
+        if (startClient == nullptr) {
+            env->ExceptionClear();
+            startClient = env->GetMethodID(nmClass, "StartHost", "()V");
+            if (startClient == nullptr) {
+                write_report("❌ StartClient/StartHost not found!");
+                write_network_log("❌ StartClient/StartHost not found!");
+                return;
+            }
+            write_report("🔄 Calling StartHost");
+            write_network_log("🔄 Calling StartHost");
+        } else {
+            write_report("🔄 Calling StartClient");
+            write_network_log("🔄 Calling StartClient");
+        }
+        
+        env->CallVoidMethod(nm, startClient);
+        write_report("✅ StartClient/StartHost called successfully!");
+        write_network_log("✅ StartClient/StartHost called successfully!");
+        write_connect_log("🟢 [NetworkManager] Connected to: " + ip);
+        
+    } catch (const std::exception& e) {
+        write_report("❌ Exception: " + std::string(e.what()));
+        write_network_log("❌ Exception: " + std::string(e.what()));
+    } catch (...) {
+        write_report("❌ Unknown exception!");
+        write_network_log("❌ Unknown exception!");
+    }
+    
+    write_network_log("========== FINISHED ==========\n");
+}
+
+// ======================== روش 4: تست همه روش‌ها ========================
+static void test_all_methods(JNIEnv* env) {
+    write_report("\n\n========== TEST ALL METHODS ==========");
+    write_report("Time: " + get_time());
+    write_connect_log("\n\n========== TEST ALL METHODS ==========");
+    write_connect_log("Time: " + get_time());
+    
+    write_report("🔬 Testing all connection methods...");
+    write_connect_log("🔬 Testing all connection methods...");
+    
+    // روش 1: هوک
+    write_report("\n--- Method 1: Hook ---");
+    write_connect_log("\n--- Method 1: Hook ---");
+    if (g_hookInstalled) {
+        write_report("✅ Hook is installed. Click Connect button in game to test.");
+        write_connect_log("✅ Hook is installed. Click Connect button in game to test.");
+    } else {
+        write_report("⚠️ Hook not installed. Installing...");
+        write_connect_log("⚠️ Hook not installed. Installing...");
+        install_hook();
+    }
+    
+    // روش 2: Call LocalJoin
+    write_report("\n--- Method 2: Call LocalJoin ---");
+    write_connect_log("\n--- Method 2: Call LocalJoin ---");
+    call_local_join();
+    
+    // روش 3: NetworkManager
+    write_report("\n--- Method 3: NetworkManager ---");
+    write_connect_log("\n--- Method 3: NetworkManager ---");
+    connect_via_network_manager(env);
+    
+    write_report("\n✅ All tests completed!");
+    write_connect_log("\n✅ All tests completed!");
+    write_connect_log("========== TEST ALL FINISHED ==========\n");
+    write_report("========== TEST ALL FINISHED ==========\n");
 }
 
 // ======================== هوک ========================
@@ -334,9 +514,16 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     
     const char *features[] = {
-        OBFUSCATE("Category_👤 Player Info"),
-        OBFUSCATE("Button_Get Player Info"),
-        OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/player_info.txt"),
+        OBFUSCATE("Category_🔗 Connection Tests"),
+        OBFUSCATE("Button_1. Install Hook (LocalJoin)"),
+        OBFUSCATE("Button_2. Call LocalJoin"),
+        OBFUSCATE("Button_3. Connect via NetworkManager"),
+        OBFUSCATE("Button_4. TEST ALL METHODS"),
+        OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/"),
+        OBFUSCATE("RichTextView_   - hook_log.txt (Hook)"),
+        OBFUSCATE("RichTextView_   - call_log.txt (Call)"),
+        OBFUSCATE("RichTextView_   - network_log.txt (NetworkManager)"),
+        OBFUSCATE("RichTextView_   - connect_log.txt (All)"),
     };
     
     int total = sizeof features / sizeof features[0];
@@ -360,10 +547,28 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
              jint value, jlong Lvalue, jboolean boolean, jstring text) {
 
     switch (featNum) {
-        case 0:  // دکمه Get Player Info
-            write_report("\n🔘 Get Player Info button pressed");
-            write_result("🔘 Get Player Info button pressed");
-            get_player_info();
+        case 0:  // نصب هوک
+            write_report("\n🔘 Install Hook button pressed");
+            write_result("🔘 Install Hook button pressed");
+            install_hook();
+            break;
+            
+        case 1:  // Call LocalJoin
+            write_report("\n🔘 Call LocalJoin button pressed");
+            write_result("🔘 Call LocalJoin button pressed");
+            call_local_join();
+            break;
+            
+        case 2:  // Connect via NetworkManager
+            write_report("\n🔘 Connect via NetworkManager button pressed");
+            write_result("🔘 Connect via NetworkManager button pressed");
+            connect_via_network_manager(env);
+            break;
+            
+        case 3:  // Test All Methods
+            write_report("\n🔘 TEST ALL METHODS button pressed");
+            write_result("🔘 TEST ALL METHODS button pressed");
+            test_all_methods(env);
             break;
             
         default:
@@ -394,7 +599,7 @@ void hack_thread() {
     write_debug("✅ libil2cpp.so loaded!");
 
 #if defined(__aarch64__)
-    // ====== نصب هوک ======
+    // ====== نصب هوک روی Start (برای گرفتن instance) ======
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr != nullptr && is_valid_address(startAddr)) {
         int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
@@ -419,7 +624,6 @@ void hack_thread() {
     if (g_gtaInstance != nullptr) {
         write_report("✅ Got GtaMenuControl instance after wait");
     } else {
-        // تلاش مستقیم با get_Instance
         g_gtaInstance = get_gta_menu_instance();
         if (g_gtaInstance != nullptr) {
             write_report("✅ Got GtaMenuControl instance via get_Instance");
