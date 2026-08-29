@@ -24,14 +24,13 @@
 #define DEFAULT_PORT "9876"
 
 // ======================== آفست‌ها ========================
-#define OFFSET_GET_INSTANCE         0xF570C4      // GtaMenuControl.get_Instance()
-#define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
-#define OFFSET_LOCAL_JOIN           0xF5B844      // GtaMenuControl.LocalJoin()
-#define OFFSET_IP_INPUT             0xC0          // GtaMenuControl.ipInput
-#define OFFSET_INPUTFIELD_M_TEXT    0x180         // InputField.m_Text
-#define OFFSET_NETWORK_MANAGER      0x258         // GtaMenuControl._networkManager
-#define OFFSET_NETWORK_ADDR         0x50          // NetworkManager.networkAddress
-#define OFFSET_START_CLIENT         0x1AACCB4     // NetworkManager.StartClient()
+#define OFFSET_GET_INSTANCE         0xF570C4
+#define OFFSET_GTA_START            0xF571A4
+#define OFFSET_IP_INPUT             0xC0
+#define OFFSET_INPUTFIELD_M_TEXT    0x180
+#define OFFSET_NETWORK_MANAGER      0x258
+#define OFFSET_NETWORK_ADDR         0x50
+#define OFFSET_START_CLIENT         0x1AACCB4
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -44,7 +43,6 @@ static std::string g_hookLog = g_basePath + "hook_log.txt";
 
 static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
-static bool g_gtaReady = false;
 static bool g_startClientHookInstalled = false;
 static std::string g_targetIP = "";
 
@@ -109,7 +107,7 @@ static std::string load_ip() {
     return "";
 }
 
-// ======================== کرش‌گیر کامل ========================
+// ======================== کرش‌گیر ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -123,8 +121,6 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
     f << "  pc: 0x" << std::hex << sc->pc << "\n";
     f << "  lr: 0x" << std::hex << sc->regs[30] << "\n";
     f << "  sp: 0x" << std::hex << sc->sp << "\n";
-    f << "  x0: 0x" << std::hex << sc->regs[0] << "\n";
-    f << "  x1: 0x" << std::hex << sc->regs[1] << "\n";
     #endif
     f << "========================================\n\n";
     f.close();
@@ -193,23 +189,8 @@ static void* create_mono_string(const char* str) {
     typedef void* (*il2cpp_string_new_t)(const char*);
     il2cpp_string_new_t il2cpp_string_new = 
         (il2cpp_string_new_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_new");
-    if (il2cpp_string_new == nullptr) {
-        write_connect_log("❌ il2cpp_string_new not found");
-        return nullptr;
-    }
+    if (il2cpp_string_new == nullptr) return nullptr;
     return il2cpp_string_new(str);
-}
-
-// ======================== گرفتن IP ========================
-static std::string get_ip() {
-    if (!g_targetIP.empty()) return g_targetIP;
-    
-    std::string ip = load_ip();
-    if (ip.empty()) {
-        ip = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
-        save_ip(ip);
-    }
-    return ip;
 }
 
 // ======================== گرفتن GtaMenuControl ========================
@@ -220,18 +201,13 @@ static void* get_gta_instance() {
     
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance == nullptr) {
-        write_connect_log("❌ GtaMenuControl.get_Instance not found");
-        return nullptr;
-    }
+    if (get_Instance == nullptr) return nullptr;
     
     void* instance = get_Instance();
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
         return instance;
     }
-    
     return nullptr;
 }
 
@@ -251,6 +227,7 @@ static void inject_ip_to_input(const std::string& ip) {
     
     *mTextPtr = monoString;
     write_report("✅ IP injected: " + ip);
+    write_result("✅ IP injected: " + ip);
 }
 
 // ======================== ======== هوک روی StartClient ======== ========================
@@ -261,9 +238,7 @@ void hook_StartClient(void *instance) {
     write_hook_log("📡 Instance: 0x" + std::to_string((uintptr_t)instance));
     write_connect_log("🔥 StartClient() HOOKED at " + get_time());
     write_report("🔥 StartClient() was called by game!");
-    __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "🔥 StartClient() HOOKED!");
     
-    // گرفتن IP از NetworkManager
     if (instance != nullptr && is_valid_address(instance)) {
         void* nmAddr = (void*)((uintptr_t)instance + OFFSET_NETWORK_ADDR);
         if (is_valid_address(nmAddr)) {
@@ -305,7 +280,6 @@ static void install_startclient_hook() {
             g_startClientHookInstalled = true;
             write_report("✅ StartClient hook installed at 0x" + std::to_string((uintptr_t)addr));
             write_hook_log("✅ StartClient hook installed at 0x" + std::to_string((uintptr_t)addr));
-            __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "✅ StartClient hook installed!");
         } else {
             write_report("❌ StartClient hook failed! error: " + std::to_string(res));
             write_hook_log("❌ StartClient hook failed! error: " + std::to_string(res));
@@ -319,89 +293,11 @@ static void install_startclient_hook() {
 #endif
 }
 
-// ======================== اتصال با LocalJoin ========================
-static void connect_with_localjoin() {
-    write_connect_log("\n========== CONNECT WITH LOCALJOIN ==========");
-    write_connect_log("Time: " + get_time());
-    write_report("🔘 Connect button pressed");
-    write_result("🔘 Connect button pressed");
-    
-    try {
-        // 1. گرفتن IP
-        std::string ip = get_ip();
-        write_connect_log("📡 Target IP: " + ip);
-        write_report("📡 Target IP: " + ip);
-        
-        // 2. گرفتن GtaMenuControl
-        void* gtaInstance = get_gta_instance();
-        if (gtaInstance == nullptr || !is_valid_address(gtaInstance)) {
-            write_connect_log("❌ GtaMenuControl instance is null or invalid");
-            write_report("❌ GtaMenuControl instance not found");
-            return;
-        }
-        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)gtaInstance));
-        
-        // 3. تزریق IP به ipInput
-        inject_ip_to_input(ip);
-        
-        // 4. گرفتن NetworkManager
-        void* nmInstance = *(void**)((uintptr_t)gtaInstance + OFFSET_NETWORK_MANAGER);
-        if (nmInstance == nullptr || !is_valid_address(nmInstance)) {
-            write_connect_log("⚠️ NetworkManager from _networkManager is null, continuing anyway...");
-        } else {
-            write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nmInstance));
-            // تنظیم networkAddress همزمان
-            void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
-            if (is_valid_address(nmAddr)) {
-                void** nmAddrPtr = (void**)nmAddr;
-                if (nmAddrPtr != nullptr) {
-                    void* monoString = create_mono_string(ip.c_str());
-                    if (monoString != nullptr) {
-                        *nmAddrPtr = monoString;
-                        write_connect_log("✅ networkAddress set to: " + ip);
-                    }
-                }
-            }
-        }
-        
-        // 5. صدا زدن LocalJoin
-        void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
-        if (localJoinAddr == nullptr || !is_valid_address(localJoinAddr)) {
-            write_connect_log("❌ LocalJoin address not found!");
-            write_report("❌ LocalJoin address not found!");
-            return;
-        }
-        write_connect_log("✅ LocalJoin address: 0x" + std::to_string((uintptr_t)localJoinAddr));
-        
-        typedef void (*local_join_t)(void*);
-        local_join_t LocalJoin = (local_join_t)localJoinAddr;
-        
-        write_connect_log("🔄 Calling LocalJoin()...");
-        write_report("🔄 Calling LocalJoin()...");
-        LocalJoin(gtaInstance);
-        
-        write_connect_log("✅ LocalJoin() called successfully!");
-        write_report("✅ LocalJoin() called successfully!");
-        write_result("✅ Connecting...");
-        
-    } catch (const std::exception& e) {
-        write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_report("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
-    } catch (...) {
-        write_connect_log("❌ Unknown exception!");
-        write_report("❌ Unknown exception!");
-        write_crash("⚠️ Unknown exception!");
-    }
-    write_connect_log("========== CONNECT FINISHED ==========\n");
-}
-
 // ======================== هوک GtaMenuControl.Start ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        g_gtaReady = true;
         write_report("✅ Hook captured GtaMenuControl instance");
         write_connect_log("✅ GtaMenuControl instance captured: 0x" + std::to_string((uintptr_t)instance));
     }
@@ -418,8 +314,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         OBFUSCATE("Category_🌐 Network"),
         OBFUSCATE("InputText_Enter IP"),
         OBFUSCATE("Button_Inject IP"),
-        OBFUSCATE("Button_Install StartClient Hook"),
-        OBFUSCATE("Button_Connect (LocalJoin)"),
+        OBFUSCATE("Button_Install Hook (StartClient)"),
+        OBFUSCATE("RichTextView_📁 After hook, click Connect in game"),
         OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/"),
     };
     
@@ -474,13 +370,8 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         }
         
         case 2: {
-            write_report("🔘 Install StartClient Hook pressed");
+            write_report("🔘 Install Hook pressed");
             install_startclient_hook();
-            break;
-        }
-        
-        case 3: {
-            connect_with_localjoin();
             break;
         }
         
@@ -497,88 +388,33 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    int waitCount = 0;
-
-    write_report("⏳ Waiting for libil2cpp.so to load...");
-
-    while (!isLibraryLoaded(targetLibName) && waitCount < 30) {
-        sleep(1);
-        waitCount++;
-    }
-
-    if (waitCount >= 30) {
-        write_report("❌ Timeout waiting for libil2cpp.so");
-        return;
-    }
-
-    write_report("✅ libil2cpp.so loaded successfully");
-
+    while (!isLibraryLoaded(targetLibName)) sleep(1);
+    write_report("✅ lib loaded");
+    
 #if defined(__aarch64__)
-    // ====== هوک روی GtaMenuControl.Start ======
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
-    if (startAddr != nullptr && is_valid_address(startAddr)) {
-        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        if (res == 0) {
-            write_report("✅ GtaMenuControl.Start() hooked");
-        } else {
-            write_report("❌ GtaMenuControl.Start() hook failed! error: " + std::to_string(res));
-        }
-    } else {
-        write_report("❌ GtaMenuControl.Start() address not found");
+    if (startAddr != nullptr) {
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        write_report("✅ GtaMenuControl.Start() hooked");
     }
 #endif
-
-    // ====== گرفتن instance ======
-    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) {
-        sleep(1);
-    }
     
-    if (g_gtaInstance != nullptr) {
-        write_report("✅ Got GtaMenuControl instance after wait");
-        write_connect_log("✅ Got GtaMenuControl instance after wait");
-    } else {
-        g_gtaInstance = get_gta_instance();
-        if (g_gtaInstance != nullptr) {
-            write_report("✅ Got GtaMenuControl instance via get_Instance");
-            write_connect_log("✅ Got GtaMenuControl instance via get_Instance");
-        }
-    }
-
-    // ====== IP ======
+    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) sleep(1);
+    
     g_targetIP = load_ip();
     if (g_targetIP.empty()) {
         g_targetIP = std::string(DEFAULT_IP) + ":" + std::string(DEFAULT_PORT);
         save_ip(g_targetIP);
         write_report("📌 Default IP set: " + g_targetIP);
-    } else {
-        write_report("📌 IP loaded from file: " + g_targetIP);
     }
-
-    write_report("✅ hack_thread finished successfully");
+    
+    write_report("✅ hack done");
 }
 
-// ======================== تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
     create_directory();
     install_crash_handler();
-
-    std::ofstream f(g_debugLog);
-    if (f.is_open()) {
-        f << "========== MOD LOADED ==========\n";
-        f << "Time: " << get_time() << "\n";
-        f << "===============================\n\n";
-        f.close();
-    }
-
-    std::ofstream report(g_reportLog);
-    if (report.is_open()) {
-        report << "========== FULL REPORT ==========\n";
-        report << "Started at: " << get_time() << "\n";
-        report << "==================================\n\n";
-        report.close();
-    }
-
-    write_report("🚀 lib_main called - mod loading");
+    write_report("🚀 lib_main called");
     std::thread(hack_thread).detach();
 }
