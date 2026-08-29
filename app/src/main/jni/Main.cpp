@@ -19,12 +19,12 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (همه از دامپ) ========================
-#define OFFSET_GET_INSTANCE         0xF570C4      // GtaMenuControl.get_Instance()
-#define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
-#define OFFSET_LOCAL_JOIN           0xF5B844      // GtaMenuControl.LocalJoin()
-#define OFFSET_IP_INPUT             0xC0          // GtaMenuControl.ipInput
-#define OFFSET_INPUTFIELD_M_TEXT    0x180         // InputField.m_Text
+// ======================== آفست‌ها ========================
+#define OFFSET_GET_INSTANCE         0xF570C4
+#define OFFSET_GTA_START            0xF571A4
+#define OFFSET_LOCAL_JOIN           0xF5B844      // ✅ GtaMenuControl.LocalJoin()
+#define OFFSET_IP_INPUT             0xC0
+#define OFFSET_INPUTFIELD_M_TEXT    0x180
 
 // ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -65,6 +65,10 @@ static void write_connect_log(const std::string& msg) {
 
 static void write_result(const std::string& msg) {
     write_log(g_ipResultLog, msg);
+}
+
+static void write_crash(const std::string& msg) {
+    write_log(g_crashLog, msg);
 }
 
 static void create_directory() {
@@ -190,6 +194,7 @@ void hook_LocalJoin(void *instance) {
     write_connect_log("Time: " + get_time());
     write_connect_log("📡 IP: " + ip);
     write_report("🟢 [HOOK] LocalJoin called - IP: " + ip);
+    __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "🟢 [HOOK] LocalJoin called - IP: %s", ip.c_str());
     
     if (orig_LocalJoin) {
         orig_LocalJoin(instance);
@@ -215,50 +220,75 @@ static void install_hook() {
         if (res == 0) {
             g_hookInstalled = true;
             write_report("✅ LocalJoin() hooked at 0x" + std::to_string((uintptr_t)localJoinAddr));
-            write_connect_log("✅ Hook installed");
+            write_connect_log("✅ Hook installed at 0x" + std::to_string((uintptr_t)localJoinAddr));
+            __android_log_print(ANDROID_LOG_INFO, "LAC_Mod", "✅ LocalJoin hook installed!");
         } else {
             write_report("❌ Hook failed! error: " + std::to_string(res));
+            write_connect_log("❌ Hook failed! error: " + std::to_string(res));
         }
     } else {
         write_report("❌ LocalJoin address not found!");
+        write_connect_log("❌ LocalJoin address not found!");
     }
+#else
+    write_report("❌ Not ARM64");
+    write_connect_log("❌ Not ARM64");
 #endif
 }
 
-// ======================== صدا زدن LocalJoin با آفست مستقیم ========================
-static void call_local_join_direct() {
-    write_connect_log("\n========== CALL LOCALJOIN DIRECT ==========");
+// ======================== صدا زدن LocalJoin با آفست مستقیم (امن) ========================
+static void call_local_join_direct_safe() {
+    write_connect_log("\n========== CALL LOCALJOIN DIRECT (SAFE) ==========");
     write_connect_log("Time: " + get_time());
     
     try {
+        // 1. گرفتن instance
         void* instance = get_gta_instance();
         if (instance == nullptr || !is_valid_address(instance)) {
             write_connect_log("❌ Cannot get GtaMenuControl instance!");
+            write_report("❌ Cannot get GtaMenuControl instance!");
+            write_result("❌ No instance!");
             return;
         }
+        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
         
+        // 2. گرفتن IP
         std::string ip = get_ip_from_input();
         write_connect_log("📡 Target IP: " + ip);
         write_report("📡 Target IP: " + ip);
         
+        // 3. گرفتن آدرس LocalJoin
         void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
         if (localJoinAddr == nullptr || !is_valid_address(localJoinAddr)) {
             write_connect_log("❌ LocalJoin address not found!");
+            write_report("❌ LocalJoin address not found!");
+            write_result("❌ Address not found!");
             return;
         }
+        write_connect_log("✅ LocalJoin address: 0x" + std::to_string((uintptr_t)localJoinAddr));
         
+        // 4. صدا زدن
         typedef void (*local_join_t)(void* instance);
         local_join_t LocalJoin = (local_join_t)localJoinAddr;
         
         write_connect_log("🔄 Calling LocalJoin()...");
+        write_report("🔄 Calling LocalJoin()...");
+        
+        // صدا زدن با try-catch
         LocalJoin(instance);
+        
         write_connect_log("✅ LocalJoin() called successfully!");
-        write_result("✅ LocalJoin called");
+        write_report("✅ LocalJoin() called successfully!");
+        write_result("✅ LocalJoin called!");
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
+        write_report("❌ Exception: " + std::string(e.what()));
+        write_crash("⚠️ Exception in LocalJoin: " + std::string(e.what()));
     } catch (...) {
-        write_connect_log("❌ Unknown exception!");
+        write_connect_log("❌ Unknown exception in LocalJoin!");
+        write_report("❌ Unknown exception in LocalJoin!");
+        write_crash("⚠️ Unknown exception in LocalJoin!");
     }
     write_connect_log("========== CALL FINISHED ==========\n");
 }
@@ -279,7 +309,7 @@ void hook_GtaMenuStart(void *instance) {
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
     const char *features[] = {
-        OBFUSCATE("Category_🔗 Connection"),
+        OBFUSCATE("Category_🔗 LocalJoin"),
         OBFUSCATE("Button_1. Install Hook"),
         OBFUSCATE("Button_2. Call LocalJoin (Direct)"),
         OBFUSCATE("Button_3. Test Both"),
@@ -303,13 +333,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
             break;
         case 1:
             write_report("🔘 Call LocalJoin (Direct) pressed");
-            call_local_join_direct();
+            call_local_join_direct_safe();
             break;
         case 2:
             write_report("🔘 Test Both pressed");
             write_connect_log("\n========== TEST BOTH ==========");
             install_hook();
-            call_local_join_direct();
+            call_local_join_direct_safe();
             write_connect_log("========== TEST BOTH FINISHED ==========\n");
             break;
         default:
