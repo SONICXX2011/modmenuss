@@ -19,11 +19,9 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== IP پیش‌فرض ========================
 #define DEFAULT_IP "5.57.37.224"
 #define DEFAULT_PORT "9876"
 
-// ======================== آفست‌ها (همه از دامپ) ========================
 #define OFFSET_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START            0xF571A4
 #define OFFSET_IP_INPUT             0xC0
@@ -34,7 +32,6 @@
 #define OFFSET_LOCAL_JOIN           0xF5B844
 #define OFFSET_ON_CLIENT_CONNECT    0xF7FA8C
 
-// ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
@@ -46,8 +43,9 @@ static bool g_crashHandlerInstalled = false;
 static void* g_gtaInstance = nullptr;
 static void* g_networkManagerInstance = nullptr;
 static std::string g_targetIP = "";
+static bool g_gtaReady = false;
 
-// ======================== ۱. توابع کمکی (قبل از همه) ========================
+// ======================== توابع کمکی ========================
 static std::string get_time() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -64,7 +62,6 @@ static void write_log(const std::string& file, const std::string& msg) {
     }
 }
 
-// ======================== ۲. توابع لاگ (بعد از write_log) ========================
 static void write_debug(const std::string& msg) {
     write_log(g_debugLog, msg);
     LOGI("[Debug] %s", msg.c_str());
@@ -111,7 +108,7 @@ static void save_ip(const std::string& ip) {
     }
 }
 
-// ======================== ۳. کرش‌گیر ========================
+// ======================== کرش‌گیر ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -148,7 +145,7 @@ static void install_crash_handler() {
     write_report("✅ Crash handler installed");
 }
 
-// ======================== ۴. توابع IL2CPP و حافظه ========================
+// ======================== چک آدرس ========================
 static bool is_valid_address(void* addr) {
     if (addr == nullptr) return false;
     uintptr_t ptr = (uintptr_t)addr;
@@ -158,34 +155,7 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-static std::string mono_string_to_utf8(void* monoString) {
-    if (monoString == nullptr) return "";
-    if (!is_valid_address(monoString)) return "";
-    
-    typedef int32_t (*il2cpp_string_length_t)(void*);
-    il2cpp_string_length_t il2cpp_string_length = 
-        (il2cpp_string_length_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
-    if (il2cpp_string_length == nullptr) return "";
-    
-    int length = il2cpp_string_length(monoString);
-    if (length <= 0 || length > 65536) return "";
-    
-    typedef uint16_t* (*il2cpp_string_chars_t)(void*);
-    il2cpp_string_chars_t il2cpp_string_chars = 
-        (il2cpp_string_chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
-    if (il2cpp_string_chars == nullptr) return "";
-    
-    uint16_t* chars = il2cpp_string_chars(monoString);
-    if (chars == nullptr) return "";
-    
-    std::string result;
-    result.reserve(length);
-    for (int i = 0; i < length; i++) {
-        result += (char)(chars[i] & 0xFF);
-    }
-    return result;
-}
-
+// ======================== IL2CPP توابع ========================
 static void* create_mono_string(const char* str) {
     if (str == nullptr) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -195,36 +165,50 @@ static void* create_mono_string(const char* str) {
     return il2cpp_string_new(str);
 }
 
-// ======================== ۵. گرفتن instance‌ها ========================
-static void* get_gta_instance() {
+// ======================== گرفتن instance با انتظار ========================
+static void* get_gta_instance_safe() {
+    // اول از حافظه کش
     if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
         return g_gtaInstance;
     }
     
+    // امتحان get_Instance
     typedef void* (*get_instance_t)();
     get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", "GtaMenuControl.get_Instance");
-    if (get_Instance == nullptr) {
-        write_connect_log("❌ GtaMenuControl.get_Instance not found");
-        return nullptr;
+    if (get_Instance != nullptr) {
+        void* instance = get_Instance();
+        if (instance != nullptr && is_valid_address(instance)) {
+            g_gtaInstance = instance;
+            g_gtaReady = true;
+            write_connect_log("✅ GtaMenuControl instance from get_Instance");
+            return instance;
+        }
     }
     
-    void* instance = get_Instance();
-    if (instance != nullptr && is_valid_address(instance)) {
-        g_gtaInstance = instance;
-        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)instance));
-        return instance;
+    // منتظر هوک
+    for (int i = 0; i < 10 && g_gtaInstance == nullptr; i++) {
+        write_connect_log("⏳ Waiting for GtaMenuControl instance... (" + std::to_string(i+1) + "/10)");
+        sleep(1);
     }
+    
+    if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
+        write_connect_log("✅ GtaMenuControl instance from hook");
+        g_gtaReady = true;
+        return g_gtaInstance;
+    }
+    
+    write_connect_log("❌ GtaMenuControl instance not found!");
     return nullptr;
 }
 
-static void* get_network_manager_instance() {
+static void* get_network_manager_safe() {
     if (g_networkManagerInstance != nullptr && is_valid_address(g_networkManagerInstance)) {
         return g_networkManagerInstance;
     }
     
-    void* gtaInstance = get_gta_instance();
+    void* gtaInstance = get_gta_instance_safe();
     if (gtaInstance == nullptr) {
-        write_connect_log("❌ Cannot get GtaMenuControl instance for NetworkManager");
+        write_connect_log("❌ Cannot get GtaMenuControl for NetworkManager");
         return nullptr;
     }
     
@@ -239,12 +223,16 @@ static void* get_network_manager_instance() {
     return nmInstance;
 }
 
+// ======================== تزریق IP ========================
 static void inject_ip_to_input(const std::string& ip) {
-    void* instance = get_gta_instance();
+    void* instance = get_gta_instance_safe();
     if (instance == nullptr) return;
     
     void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
-    if (ipInput == nullptr || !is_valid_address(ipInput)) return;
+    if (ipInput == nullptr || !is_valid_address(ipInput)) {
+        write_connect_log("❌ ipInput is null");
+        return;
+    }
     
     void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
     if (mTextPtr == nullptr) return;
@@ -253,13 +241,14 @@ static void inject_ip_to_input(const std::string& ip) {
     if (monoString == nullptr) return;
     
     *mTextPtr = monoString;
-    write_report("✅ IP injected: " + ip);
+    write_connect_log("✅ IP injected: " + ip);
 }
 
-// ======================== ۶. روش‌های اتصال ========================
-// روش ۱: StartClient با UI Thread
-static void connect_method1(JNIEnv* env) {
-    write_connect_log("\n========== [METHOD 1] StartClient (UI Thread) ==========");
+// ======================== روش‌های اتصال با چک کامل ========================
+
+// روش ۱: StartClient
+static void connect_method1() {
+    write_connect_log("\n========== METHOD 1: StartClient ==========");
     write_connect_log("Time: " + get_time());
     write_report("🔘 Method 1 pressed");
     
@@ -267,13 +256,18 @@ static void connect_method1(JNIEnv* env) {
         std::string ip = get_ip();
         write_connect_log("📡 Target IP: " + ip);
         
-        void* nmInstance = get_network_manager_instance();
+        // ابتدا تزریق IP
+        inject_ip_to_input(ip);
+        
+        // گرفتن NetworkManager
+        void* nmInstance = get_network_manager_safe();
         if (nmInstance == nullptr) {
-            write_connect_log("❌ NetworkManager instance not found");
+            write_connect_log("❌ Cannot get NetworkManager");
             return;
         }
-        write_connect_log("✅ NetworkManager instance: 0x" + std::to_string((uintptr_t)nmInstance));
+        write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nmInstance));
         
+        // تنظیم networkAddress
         void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
         if (is_valid_address(nmAddr)) {
             void** nmAddrPtr = (void**)nmAddr;
@@ -281,39 +275,38 @@ static void connect_method1(JNIEnv* env) {
                 void* monoString = create_mono_string(ip.c_str());
                 if (monoString != nullptr) {
                     *nmAddrPtr = monoString;
-                    write_connect_log("✅ networkAddress set to: " + ip);
+                    write_connect_log("✅ networkAddress set");
                 }
             }
         }
         
+        // StartClient
         void* startClientAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1AACCB4"));
-        if (startClientAddr == nullptr) {
-            write_connect_log("❌ StartClient address not found");
+        if (startClientAddr == nullptr || !is_valid_address(startClientAddr)) {
+            write_connect_log("❌ StartClient address invalid");
             return;
         }
-        write_connect_log("✅ StartClient address: 0x" + std::to_string((uintptr_t)startClientAddr));
         
         typedef void (*start_client_t)(void*);
         start_client_t StartClient = (start_client_t)startClientAddr;
         
         write_connect_log("🔄 Calling StartClient()...");
         StartClient(nmInstance);
-        write_connect_log("✅ StartClient() called");
-        write_result("✅ Method 1: StartClient");
+        write_connect_log("✅ StartClient called");
+        write_result("✅ StartClient");
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
+        write_crash("⚠️ " + std::string(e.what()));
     } catch (...) {
         write_connect_log("❌ Unknown exception");
         write_crash("⚠️ Unknown exception");
     }
-    write_connect_log("========== METHOD 1 FINISHED ==========\n");
 }
 
-// روش ۲: LocalJoin با UI Thread
-static void connect_method2(JNIEnv* env) {
-    write_connect_log("\n========== [METHOD 2] LocalJoin (UI Thread) ==========");
+// روش ۲: LocalJoin
+static void connect_method2() {
+    write_connect_log("\n========== METHOD 2: LocalJoin ==========");
     write_connect_log("Time: " + get_time());
     write_report("🔘 Method 2 pressed");
     
@@ -321,297 +314,49 @@ static void connect_method2(JNIEnv* env) {
         std::string ip = get_ip();
         write_connect_log("📡 Target IP: " + ip);
         
-        void* gtaInstance = get_gta_instance();
-        if (gtaInstance == nullptr) {
-            write_connect_log("❌ GtaMenuControl instance not found");
-            return;
-        }
-        write_connect_log("✅ GtaMenuControl instance: 0x" + std::to_string((uintptr_t)gtaInstance));
-        
+        // تزریق IP
         inject_ip_to_input(ip);
         
-        void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
-        if (localJoinAddr == nullptr) {
-            write_connect_log("❌ LocalJoin address not found");
+        // گرفتن GtaMenuControl
+        void* gtaInstance = get_gta_instance_safe();
+        if (gtaInstance == nullptr) {
+            write_connect_log("❌ Cannot get GtaMenuControl");
             return;
         }
-        write_connect_log("✅ LocalJoin address: 0x" + std::to_string((uintptr_t)localJoinAddr));
+        write_connect_log("✅ GtaMenuControl: 0x" + std::to_string((uintptr_t)gtaInstance));
+        
+        // LocalJoin
+        void* localJoinAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF5B844"));
+        if (localJoinAddr == nullptr || !is_valid_address(localJoinAddr)) {
+            write_connect_log("❌ LocalJoin address invalid");
+            return;
+        }
         
         typedef void (*local_join_t)(void*);
         local_join_t LocalJoin = (local_join_t)localJoinAddr;
         
         write_connect_log("🔄 Calling LocalJoin()...");
         LocalJoin(gtaInstance);
-        write_connect_log("✅ LocalJoin() called");
-        write_result("✅ Method 2: LocalJoin");
+        write_connect_log("✅ LocalJoin called");
+        write_result("✅ LocalJoin");
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
+        write_crash("⚠️ " + std::string(e.what()));
     } catch (...) {
         write_connect_log("❌ Unknown exception");
         write_crash("⚠️ Unknown exception");
     }
-    write_connect_log("========== METHOD 2 FINISHED ==========\n");
 }
 
-// روش ۳: JNI + FindObjectOfType
-static void connect_method3(JNIEnv* env) {
-    if (env == nullptr) {
-        write_connect_log("❌ JNIEnv is null!");
-        return;
-    }
-    
-    write_connect_log("\n========== [METHOD 3] JNI + FindObjectOfType ==========");
-    write_connect_log("Time: " + get_time());
-    write_report("🔘 Method 3 pressed");
-    
-    try {
-        std::string ip = get_ip();
-        write_connect_log("📡 Target IP: " + ip);
-        
-        jclass objClass = env->FindClass("UnityEngine/Object");
-        if (objClass == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ UnityEngine.Object class not found");
-            return;
-        }
-        write_connect_log("✅ UnityEngine.Object class found");
-        
-        jmethodID findObj = env->GetStaticMethodID(objClass, "FindObjectOfType", "(Ljava/lang/Class;)Ljava/lang/Object;");
-        if (findObj == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ FindObjectOfType method not found");
-            env->DeleteLocalRef(objClass);
-            return;
-        }
-        write_connect_log("✅ FindObjectOfType method found");
-        
-        jclass nmClass = env->FindClass("CustomNetworkManager");
-        if (nmClass == nullptr) {
-            env->ExceptionClear();
-            nmClass = env->FindClass("NetworkManager");
-            if (nmClass == nullptr) {
-                env->ExceptionClear();
-                write_connect_log("❌ CustomNetworkManager/NetworkManager class not found");
-                env->DeleteLocalRef(objClass);
-                return;
-            }
-        }
-        write_connect_log("✅ CustomNetworkManager class found");
-        
-        jobject nmObj = env->CallStaticObjectMethod(objClass, findObj, nmClass);
-        env->DeleteLocalRef(objClass);
-        env->DeleteLocalRef(nmClass);
-        
-        if (nmObj == nullptr) {
-            write_connect_log("❌ CustomNetworkManager instance not found");
-            return;
-        }
-        write_connect_log("✅ CustomNetworkManager instance found: 0x" + std::to_string((uintptr_t)nmObj));
-        
-        jclass nmObjClass = env->GetObjectClass(nmObj);
-        jfieldID addrField = env->GetFieldID(nmObjClass, "networkAddress", "Ljava/lang/String;");
-        if (addrField != nullptr) {
-            jstring jip = env->NewStringUTF(ip.c_str());
-            env->SetObjectField(nmObj, addrField, jip);
-            env->DeleteLocalRef(jip);
-            write_connect_log("✅ networkAddress set via JNI");
-        }
-        
-        jmethodID startClient = env->GetMethodID(nmObjClass, "StartClient", "()V");
-        if (startClient == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ StartClient method not found");
-            env->DeleteLocalRef(nmObj);
-            env->DeleteLocalRef(nmObjClass);
-            return;
-        }
-        write_connect_log("✅ StartClient method found");
-        
-        write_connect_log("🔄 Calling StartClient() via JNI...");
-        env->CallVoidMethod(nmObj, startClient);
-        
-        if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-            write_connect_log("⚠️ Exception during StartClient call");
-        } else {
-            write_connect_log("✅ StartClient() called successfully via JNI");
-            write_result("✅ Method 3: JNI + FindObjectOfType");
-        }
-        
-        env->DeleteLocalRef(nmObj);
-        env->DeleteLocalRef(nmObjClass);
-        
-    } catch (const std::exception& e) {
-        write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
-    } catch (...) {
-        write_connect_log("❌ Unknown exception");
-        write_crash("⚠️ Unknown exception");
-    }
-    write_connect_log("========== METHOD 3 FINISHED ==========\n");
-}
-
-// روش ۴: JNI + ClassLoader
-static void connect_method4(JNIEnv* env) {
-    if (env == nullptr) {
-        write_connect_log("❌ JNIEnv is null!");
-        return;
-    }
-    
-    write_connect_log("\n========== [METHOD 4] JNI + ClassLoader ==========");
-    write_connect_log("Time: " + get_time());
-    write_report("🔘 Method 4 pressed");
-    
-    try {
-        std::string ip = get_ip();
-        write_connect_log("📡 Target IP: " + ip);
-        
-        jclass unityPlayerClass = env->FindClass("com/unity3d/player/UnityPlayer");
-        if (unityPlayerClass == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ UnityPlayer class not found");
-            return;
-        }
-        write_connect_log("✅ UnityPlayer class found");
-        
-        jfieldID currentActivityField = env->GetStaticFieldID(unityPlayerClass, "currentActivity", "Landroid/app/Activity;");
-        jobject activity = env->GetStaticObjectField(unityPlayerClass, currentActivityField);
-        if (activity == nullptr) {
-            write_connect_log("❌ Activity is null");
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ Activity obtained");
-        
-        jclass activityCls = env->GetObjectClass(activity);
-        jmethodID getClassLoader = env->GetMethodID(activityCls, "getClassLoader", "()Ljava/lang/ClassLoader;");
-        jobject classLoader = env->CallObjectMethod(activity, getClassLoader);
-        if (classLoader == nullptr) {
-            write_connect_log("❌ ClassLoader is null");
-            env->DeleteLocalRef(activityCls);
-            env->DeleteLocalRef(activity);
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ ClassLoader obtained");
-        
-        jclass classLoaderCls = env->FindClass("java/lang/ClassLoader");
-        jmethodID loadClass = env->GetMethodID(classLoaderCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-        jstring className = env->NewStringUTF("GtaMenuControl");
-        jclass gtaClass = (jclass)env->CallObjectMethod(classLoader, loadClass, className);
-        env->DeleteLocalRef(className);
-        
-        if (gtaClass == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ GtaMenuControl class not found");
-            env->DeleteLocalRef(classLoaderCls);
-            env->DeleteLocalRef(classLoader);
-            env->DeleteLocalRef(activityCls);
-            env->DeleteLocalRef(activity);
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ GtaMenuControl class found");
-        
-        jmethodID getInstance = env->GetStaticMethodID(gtaClass, "get_Instance", "()LGtaMenuControl;");
-        if (getInstance == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ get_Instance method not found");
-            env->DeleteLocalRef(gtaClass);
-            env->DeleteLocalRef(classLoaderCls);
-            env->DeleteLocalRef(classLoader);
-            env->DeleteLocalRef(activityCls);
-            env->DeleteLocalRef(activity);
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ get_Instance method found");
-        
-        jobject gtaObj = env->CallStaticObjectMethod(gtaClass, getInstance);
-        if (gtaObj == nullptr) {
-            write_connect_log("❌ GtaMenuControl instance is null");
-            env->DeleteLocalRef(gtaClass);
-            env->DeleteLocalRef(classLoaderCls);
-            env->DeleteLocalRef(classLoader);
-            env->DeleteLocalRef(activityCls);
-            env->DeleteLocalRef(activity);
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ GtaMenuControl instance obtained");
-        
-        jfieldID ipInputField = env->GetFieldID(gtaClass, "ipInput", "LUnityEngine/UI/InputField;");
-        if (ipInputField != nullptr) {
-            jobject ipInput = env->GetObjectField(gtaObj, ipInputField);
-            if (ipInput != nullptr) {
-                jclass inputFieldClass = env->GetObjectClass(ipInput);
-                jfieldID mTextField = env->GetFieldID(inputFieldClass, "m_Text", "Ljava/lang/String;");
-                if (mTextField != nullptr) {
-                    jstring jip = env->NewStringUTF(ip.c_str());
-                    env->SetObjectField(ipInput, mTextField, jip);
-                    env->DeleteLocalRef(jip);
-                    write_connect_log("✅ IP injected via JNI");
-                }
-                env->DeleteLocalRef(inputFieldClass);
-                env->DeleteLocalRef(ipInput);
-            }
-        }
-        
-        jmethodID localJoinMethod = env->GetMethodID(gtaClass, "LocalJoin", "()V");
-        if (localJoinMethod == nullptr) {
-            env->ExceptionClear();
-            write_connect_log("❌ LocalJoin method not found");
-            env->DeleteLocalRef(gtaObj);
-            env->DeleteLocalRef(gtaClass);
-            env->DeleteLocalRef(classLoaderCls);
-            env->DeleteLocalRef(classLoader);
-            env->DeleteLocalRef(activityCls);
-            env->DeleteLocalRef(activity);
-            env->DeleteLocalRef(unityPlayerClass);
-            return;
-        }
-        write_connect_log("✅ LocalJoin method found");
-        
-        write_connect_log("🔄 Calling LocalJoin() via JNI...");
-        env->CallVoidMethod(gtaObj, localJoinMethod);
-        
-        if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-            write_connect_log("⚠️ Exception during LocalJoin call");
-        } else {
-            write_connect_log("✅ LocalJoin() called successfully via JNI");
-            write_result("✅ Method 4: JNI + ClassLoader");
-        }
-        
-        env->DeleteLocalRef(gtaObj);
-        env->DeleteLocalRef(gtaClass);
-        env->DeleteLocalRef(classLoaderCls);
-        env->DeleteLocalRef(classLoader);
-        env->DeleteLocalRef(activityCls);
-        env->DeleteLocalRef(activity);
-        env->DeleteLocalRef(unityPlayerClass);
-        
-    } catch (const std::exception& e) {
-        write_connect_log("❌ Exception: " + std::string(e.what()));
-        write_crash("⚠️ Exception: " + std::string(e.what()));
-    } catch (...) {
-        write_connect_log("❌ Unknown exception");
-        write_crash("⚠️ Unknown exception");
-    }
-    write_connect_log("========== METHOD 4 FINISHED ==========\n");
-}
-
-// ======================== ۷. هوک‌ها ========================
+// ======================== هوک‌ها ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance != nullptr && is_valid_address(instance)) {
         g_gtaInstance = instance;
-        write_report("✅ Hook captured GtaMenuControl instance");
-        write_connect_log("✅ GtaMenuControl instance captured: 0x" + std::to_string((uintptr_t)instance));
+        g_gtaReady = true;
+        write_report("✅ Hook captured GtaMenuControl");
+        write_connect_log("✅ GtaMenuControl captured: 0x" + std::to_string((uintptr_t)instance));
     }
     if (orig_GtaMenuStart) {
         orig_GtaMenuStart(instance);
@@ -622,7 +367,7 @@ void (*orig_OnClientConnect)(void *instance, void *conn);
 void hook_OnClientConnect(void *instance, void *conn) {
     write_connect_log("\n========== ✅ CLIENT CONNECTED! ==========");
     write_connect_log("Time: " + get_time());
-    write_report("✅ Client connected to server!");
+    write_report("✅ Client connected!");
     write_result("✅ Connected!");
     if (orig_OnClientConnect) {
         orig_OnClientConnect(instance, conn);
@@ -636,44 +381,30 @@ static void install_connect_hook() {
         int res = DobbyHook(addr, (dobby_dummy_func_t)hook_OnClientConnect, (dobby_dummy_func_t*)&orig_OnClientConnect);
         if (res == 0) {
             write_report("✅ OnClientConnect hook installed");
-        } else {
-            write_report("❌ OnClientConnect hook failed");
         }
     }
 #endif
 }
 
-// ======================== ۸. منو ========================
+// ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
-    
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network"),
         OBFUSCATE("InputText_Enter IP"),
         OBFUSCATE("Button_Inject IP"),
-        OBFUSCATE("Category_🔗 New Methods (UI Thread)"),
+        OBFUSCATE("Category_🔗 Connect"),
         OBFUSCATE("Button_Method 1: StartClient"),
         OBFUSCATE("Button_Method 2: LocalJoin"),
-        OBFUSCATE("Button_Method 3: JNI + FindObjectOfType"),
-        OBFUSCATE("Button_Method 4: JNI + ClassLoader"),
         OBFUSCATE("Category_🔧 Hooks"),
         OBFUSCATE("Button_Install OnClientConnect Hook"),
         OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/"),
     };
-    
     int total = sizeof features / sizeof features[0];
     ret = (jobjectArray)env->NewObjectArray(total, env->FindClass(OBFUSCATE("java/lang/String")), env->NewStringUTF(""));
-    
-    if (ret == nullptr) {
-        write_report("❌ Failed to create jobjectArray");
-        return nullptr;
-    }
-    
     for (int i = 0; i < total; i++) {
         env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
     }
-    
-    write_report("✅ GetFeatureList returned " + std::to_string(total) + " features");
     return ret;
 }
 
@@ -686,38 +417,31 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
     
     switch (featNum) {
-        case 0: {
+        case 0:
             if (textStr != nullptr && strlen(textStr) > 0) {
                 g_targetIP = textStr;
                 save_ip(g_targetIP);
                 inject_ip_to_input(g_targetIP);
                 write_report("📝 IP entered: " + g_targetIP);
-                write_result("📝 IP entered: " + g_targetIP);
             }
             break;
-        }
-        
-        case 1: {
-            write_report("🔘 Inject IP pressed");
-            if (g_targetIP.empty()) {
-                g_targetIP = get_ip();
-                save_ip(g_targetIP);
-            }
+        case 1:
+            g_targetIP = get_ip();
             inject_ip_to_input(g_targetIP);
             write_result("✅ IP injected: " + g_targetIP);
             break;
-        }
-        
-        case 2: { connect_method1(env); break; }
-        case 3: { connect_method2(env); break; }
-        case 4: { connect_method3(env); break; }
-        case 5: { connect_method4(env); break; }
-        case 6: { install_connect_hook(); break; }
-        
-        default: {
+        case 2:
+            connect_method1();
+            break;
+        case 3:
+            connect_method2();
+            break;
+        case 4:
+            install_connect_hook();
+            break;
+        default:
             write_report("Unknown featNum: " + std::to_string(featNum));
             break;
-        }
     }
     
     if (textStr != nullptr) {
@@ -725,7 +449,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
     }
 }
 
-// ======================== ۹. ترد اصلی ========================
+// ======================== ترد اصلی ========================
 void hack_thread() {
     while (!isLibraryLoaded(targetLibName)) sleep(1);
     write_report("✅ lib loaded");
@@ -738,32 +462,28 @@ void hack_thread() {
         if (res == 0) {
             write_report("✅ GtaMenuControl.Start() hooked");
             write_debug("✅ GtaMenuControl.Start() hooked");
-        } else {
-            write_report("❌ GtaMenuControl.Start() hook failed");
-            write_debug("❌ Hook failed");
         }
-    } else {
-        write_report("❌ GtaMenuControl.Start() address not found");
-        write_debug("❌ Address not found");
     }
 #endif
     
-    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) sleep(1);
-    
-    g_targetIP = get_ip();
-    save_ip(g_targetIP);
-    write_report("📌 IP: " + g_targetIP);
-    write_debug("📌 Current IP: " + g_targetIP);
+    // منتظر instance
+    for (int i = 0; i < 20 && g_gtaInstance == nullptr; i++) {
+        sleep(1);
+    }
     
     if (g_gtaInstance != nullptr) {
+        g_gtaReady = true;
+        write_report("✅ GtaMenuControl ready");
+        g_targetIP = get_ip();
         inject_ip_to_input(g_targetIP);
+    } else {
+        write_report("⚠️ GtaMenuControl not ready after 20s");
     }
     
     write_report("✅ hack done");
     write_debug("✅ hack_thread finished");
 }
 
-// ======================== ۱۰. تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
     create_directory();
