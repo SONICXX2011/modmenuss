@@ -29,6 +29,7 @@
 #define OFFSET_NETWORK_MANAGER      0x258
 #define OFFSET_NETWORK_ADDR         0x50
 
+// ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static std::string g_ipResultLog = g_basePath + "ip_result.txt";
@@ -41,7 +42,7 @@ static void* g_gtaInstance = nullptr;
 static void* g_networkManagerInstance = nullptr;
 static std::string g_targetIP = "";
 
-// ======================== توابع کمکی ========================
+// ======================== توابع کمکی (همه تعریف شدن) ========================
 static std::string get_time() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -56,6 +57,12 @@ static void write_log(const std::string& file, const std::string& msg) {
         f << "[" << get_time() << "] " << msg << "\n";
         f.close();
     }
+}
+
+// ====== اینجا write_debug تعریف شده ======
+static void write_debug(const std::string& msg) {
+    write_log(g_debugLog, msg);
+    LOGI("[Debug] %s", msg.c_str());
 }
 
 static void write_report(const std::string& msg) {
@@ -204,20 +211,18 @@ static void* get_network_manager() {
     return nmInstance;
 }
 
-// ======================== ======== دکمه Connect ======== ========================
-static void connect_to_server() {
-    write_connect_log("\n========== CONNECT TO SERVER ==========");
+// ======================== دکمه Set IP ========================
+static void set_ip_in_network_manager() {
+    write_connect_log("\n========== SET IP IN NETWORKMANAGER ==========");
     write_connect_log("Time: " + get_time());
-    write_report("🔘 Connect button pressed");
-    write_result("🔘 Connect button pressed");
+    write_report("🔘 Set IP in NetworkManager pressed");
+    write_result("🔘 Set IP pressed");
     
     try {
-        // 1. گرفتن IP
         std::string ip = get_ip();
         write_connect_log("📡 Target IP: " + ip);
         write_report("📡 Target IP: " + ip);
         
-        // 2. گرفتن NetworkManager
         void* nmInstance = get_network_manager();
         if (nmInstance == nullptr) {
             write_connect_log("❌ NetworkManager not found");
@@ -226,7 +231,6 @@ static void connect_to_server() {
         }
         write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nmInstance));
         
-        // 3. تغییر networkAddress (آفست 0x50)
         void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
         if (!is_valid_address(nmAddr)) {
             write_connect_log("❌ networkAddress address invalid");
@@ -249,10 +253,10 @@ static void connect_to_server() {
         *nmAddrPtr = monoString;
         write_connect_log("✅ networkAddress set to: " + ip);
         write_report("✅ networkAddress set to: " + ip);
-        write_result("✅ IP set in NetworkManager");
+        write_result("✅ IP set in NetworkManager: " + ip);
         
-        write_connect_log("✅ IP set successfully! Now click Connect button in game.");
-        write_report("✅ IP set successfully! Now click Connect button in game.");
+        write_connect_log("✅ Done! Now click Connect in game.");
+        write_report("✅ Done! Now click Connect in game.");
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
@@ -263,7 +267,7 @@ static void connect_to_server() {
         write_report("❌ Unknown exception");
         write_crash("⚠️ Unknown exception");
     }
-    write_connect_log("========== CONNECT FINISHED ==========\n");
+    write_connect_log("========== SET IP FINISHED ==========\n");
 }
 
 // ======================== هوک GtaMenuControl.Start ========================
@@ -286,7 +290,6 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network"),
         OBFUSCATE("InputText_Enter IP"),
-        OBFUSCATE("Button_Inject IP"),
         OBFUSCATE("Button_Set IP in NetworkManager"),
         OBFUSCATE("RichTextView_📁 Logs: /sdcard/Download/lac/connect_log.txt"),
         OBFUSCATE("RichTextView_📌 Then click Connect in game"),
@@ -328,31 +331,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
         }
         
         case 1: {
-            write_report("🔘 Inject IP pressed");
-            if (g_targetIP.empty()) {
-                g_targetIP = get_ip();
-                save_ip(g_targetIP);
-            }
-            // تزریق به ipInput (UI)
-            void* gtaInstance = get_gta_instance();
-            if (gtaInstance != nullptr) {
-                void* ipInput = *(void**)((uintptr_t)gtaInstance + OFFSET_IP_INPUT);
-                if (ipInput != nullptr && is_valid_address(ipInput)) {
-                    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
-                    if (mTextPtr != nullptr) {
-                        void* monoString = create_mono_string(g_targetIP.c_str());
-                        if (monoString != nullptr) {
-                            *mTextPtr = monoString;
-                            write_result("✅ IP injected to UI: " + g_targetIP);
-                        }
-                    }
-                }
-            }
-            break;
-        }
-        
-        case 2: {
-            connect_to_server();
+            set_ip_in_network_manager();
             break;
         }
         
@@ -397,16 +376,19 @@ void hack_thread() {
     write_report("📌 IP: " + g_targetIP);
     write_debug("📌 Current IP: " + g_targetIP);
     
-    // تزریق خودکار IP
+    // تنظیم خودکار IP در NetworkManager
     if (g_gtaInstance != nullptr) {
-        void* ipInput = *(void**)((uintptr_t)g_gtaInstance + OFFSET_IP_INPUT);
-        if (ipInput != nullptr && is_valid_address(ipInput)) {
-            void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
-            if (mTextPtr != nullptr) {
-                void* monoString = create_mono_string(g_targetIP.c_str());
-                if (monoString != nullptr) {
-                    *mTextPtr = monoString;
-                    write_report("✅ Auto-injected IP to UI");
+        void* nmInstance = get_network_manager();
+        if (nmInstance != nullptr) {
+            void* nmAddr = (void*)((uintptr_t)nmInstance + OFFSET_NETWORK_ADDR);
+            if (is_valid_address(nmAddr)) {
+                void** nmAddrPtr = (void**)nmAddr;
+                if (nmAddrPtr != nullptr) {
+                    void* monoString = create_mono_string(g_targetIP.c_str());
+                    if (monoString != nullptr) {
+                        *nmAddrPtr = monoString;
+                        write_report("✅ Auto-set IP in NetworkManager");
+                    }
                 }
             }
         }
