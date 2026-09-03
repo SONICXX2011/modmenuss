@@ -19,13 +19,13 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
+// ======================== آفست‌های نهایی ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_ONPOINTERCLICK           0x1F08A60
+#define OFFSET_ONPOINTERCLICK           0x1F04A60   // ✅ UnityEngine.UI.Button.OnPointerClick
 
 #define MAX_WAIT 30
 
@@ -39,7 +39,7 @@ static bool g_gameReady = false;
 static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_captureEnabled = false;
-static JNIEnv* g_env = nullptr;  // ← JNIEnv ذخیره شده از Changes
+static JNIEnv* g_env = nullptr;  // JNIEnv ذخیره شده از Changes
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -63,7 +63,7 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast با JNIEnv ذخیره شده ========================
+// ======================== Toast با استفاده از JNIEnv ذخیره شده ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("❌ JNIEnv not available for Toast");
@@ -129,7 +129,7 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
-    jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0);
+    jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0); // 0 = LENGTH_SHORT
     env->DeleteLocalRef(jMsg);
     
     if (!toast) {
@@ -151,7 +151,7 @@ static void show_toast(const std::string& msg) {
     env->DeleteLocalRef(activityThread);
 }
 
-// ======================== کرش‌گیر ========================
+// ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -198,7 +198,7 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== توابع IL2CPP ========================
+// ======================== توابع IL2CPP امن ========================
 static void* create_mono_string(const char* str) {
     if (!str) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -244,11 +244,13 @@ static void* get_gta_instance_safe() {
 
 static std::string get_button_name_safe(void* btn) {
     if (!btn || !is_valid_address(btn)) return "";
+    // روش 1: از GameObject.m_Name (آفست 0x20)
     void* namePtr = *(void**)((uintptr_t)btn + OFFSET_GAMEOBJECT_NAME);
     if (namePtr && is_valid_address(namePtr)) {
         std::string name = mono_to_string_safe(namePtr);
         if (!name.empty()) return name;
     }
+    // روش 2: از UnityEngine.Object.get_name (آفست 0x1E7CE6C)
     typedef void* (*get_name_t)(void*);
     get_name_t get_name = (get_name_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E7CE6C"));
     if (get_name) {
@@ -278,6 +280,7 @@ void hook_OnPointerClick(void* button, void* eventData) {
         }
     }
     
+    // اجرای تابع اصلی
     if (orig_OnPointerClick) {
         orig_OnPointerClick(button, eventData);
     }
@@ -290,7 +293,7 @@ void hook_GtaMenuStart(void *instance) {
         g_gtaInstance = instance;
         if (!g_gameReady) {
             g_gameReady = true;
-            write_debug("✅ Game ready!");
+            write_debug("✅ Game ready! (GtaMenuControl.Start hooked)");
         }
     }
     if (orig_GtaMenuStart) {
@@ -298,7 +301,7 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
-// ======================== نصب هوک‌ها ========================
+// ======================== نصب هوک‌ها با تأخیر ========================
 static void install_hooks_with_delay() {
     write_debug("⏳ Waiting for game to load...");
     
@@ -309,7 +312,7 @@ static void install_hooks_with_delay() {
     }
     
     if (waitCount >= MAX_WAIT) {
-        write_debug("❌ Timeout!");
+        write_debug("❌ Timeout! libil2cpp.so not loaded!");
         return;
     }
     write_debug("✅ libil2cpp.so loaded");
@@ -332,7 +335,8 @@ static void install_hooks_with_delay() {
     }
     
 #if defined(__aarch64__)
-    void* onPointerClickAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F08A60"));
+    // هوک OnPointerClick (آفست 0x1F04A60)
+    void* onPointerClickAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F04A60"));
     if (onPointerClickAddr && is_valid_address(onPointerClickAddr)) {
         int res = DobbyHook(onPointerClickAddr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
         if (res == 0) {
@@ -344,6 +348,7 @@ static void install_hooks_with_delay() {
         write_debug("❌ OnPointerClick address not found");
     }
     
+    // هوک GtaMenuControl.Start
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr && is_valid_address(startAddr)) {
         int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
