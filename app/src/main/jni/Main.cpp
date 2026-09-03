@@ -21,7 +21,7 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌های تأیید شده (همه از دامپ) ========================
+// ======================== آفست‌های نهایی (همه از دامپ/IDA) ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_MENU_BUTTONS             0x30
@@ -30,11 +30,12 @@
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_ONPOINTERCLICK           0x1F04A60
+#define OFFSET_ONPOINTERCLICK           0x1F08A60   // ✅ UnityEngine.UI.Button.OnPointerClick
 
 #define MAX_BUTTONS 30
 #define MAX_WAIT 30
 
+// ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_buttonsLog = g_basePath + "buttons_list.txt";
 static std::string g_clickLog = g_basePath + "click_log.txt";
@@ -177,107 +178,70 @@ static std::string get_button_name_safe(void* btn) {
     return "";
 }
 
-// ======================== پیدا کردن همه Button‌ها با JNI (با `env` دریافتی) ========================
-static void FindAllButtonsWithJNI(JNIEnv* env) {
-    write_log(g_buttonsLog, "\n========== FIND ALL BUTTONS WITH JNI ==========");
+// ======================== نمایش همه دکمه‌ها (از menuButtons) ========================
+static void ShowAllButtons() {
+    write_log(g_buttonsLog, "\n========== ALL BUTTONS ==========");
     write_log(g_buttonsLog, "Time: " + get_time());
     
-    if (!env) {
-        write_log(g_buttonsLog, "❌ JNIEnv is null!");
+    if (!g_gameReady || !g_gtaInstance || !is_valid_address(g_gtaInstance)) {
+        write_log(g_buttonsLog, "⚠️ Game not ready!");
         write_log(g_buttonsLog, "========== DONE ==========\n");
         return;
     }
     
     try {
-        jclass buttonClass = env->FindClass("UnityEngine.UI.Button");
-        if (!buttonClass) {
-            env->ExceptionClear();
-            write_log(g_buttonsLog, "❌ UnityEngine.UI.Button class not found!");
+        void* instance = g_gtaInstance;
+        write_log(g_buttonsLog, "✅ Instance: 0x" + std::to_string((uintptr_t)instance));
+        
+        uintptr_t menuButtonsAddr = (uintptr_t)instance + OFFSET_MENU_BUTTONS;
+        if (!is_valid_address((void*)menuButtonsAddr)) {
+            write_log(g_buttonsLog, "❌ menuButtons address invalid!");
             write_log(g_buttonsLog, "========== DONE ==========\n");
             return;
         }
-        write_log(g_buttonsLog, "✅ UnityEngine.UI.Button class found");
         
-        jclass resourcesClass = env->FindClass("UnityEngine.Resources");
-        if (!resourcesClass) {
-            env->ExceptionClear();
-            write_log(g_buttonsLog, "❌ UnityEngine.Resources class not found!");
+        void** menuButtons = *(void***)menuButtonsAddr;
+        if (!menuButtons || !is_valid_address(menuButtons)) {
+            write_log(g_buttonsLog, "❌ menuButtons is null!");
             write_log(g_buttonsLog, "========== DONE ==========\n");
             return;
         }
-        write_log(g_buttonsLog, "✅ UnityEngine.Resources class found");
-        
-        jmethodID findObjectsMethod = env->GetStaticMethodID(
-            resourcesClass,
-            "FindObjectsOfTypeAll",
-            "(Ljava/lang/Class;)[Ljava/lang/Object;"
-        );
-        if (!findObjectsMethod) {
-            env->ExceptionClear();
-            write_log(g_buttonsLog, "❌ FindObjectsOfTypeAll method not found!");
-            write_log(g_buttonsLog, "========== DONE ==========\n");
-            return;
-        }
-        write_log(g_buttonsLog, "✅ FindObjectsOfTypeAll method found");
-        
-        jobjectArray buttonsArray = (jobjectArray)env->CallStaticObjectMethod(
-            resourcesClass,
-            findObjectsMethod,
-            buttonClass
-        );
-        if (!buttonsArray) {
-            env->ExceptionClear();
-            write_log(g_buttonsLog, "❌ FindObjectsOfTypeAll returned null!");
-            write_log(g_buttonsLog, "========== DONE ==========\n");
-            return;
-        }
-        write_log(g_buttonsLog, "✅ FindObjectsOfTypeAll called successfully");
-        
-        jsize buttonCount = env->GetArrayLength(buttonsArray);
-        write_log(g_buttonsLog, "📊 Total buttons found: " + std::to_string(buttonCount));
+        write_log(g_buttonsLog, "✅ menuButtons array: 0x" + std::to_string((uintptr_t)menuButtons));
         
         int found = 0;
-        for (int i = 0; i < buttonCount && i < 100; i++) {
-            jobject btnObj = env->GetObjectArrayElement(buttonsArray, i);
-            if (!btnObj) continue;
+        for (int i = 0; i < MAX_BUTTONS; i++) {
+            uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
+            if (!is_valid_address((void*)btnAddr)) continue;
             
-            jclass btnClass = env->GetObjectClass(btnObj);
-            jmethodID getNameMethod = env->GetMethodID(btnClass, "get_name", "()Ljava/lang/String;");
-            if (!getNameMethod) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(btnObj);
-                continue;
+            void* btn = *(void**)btnAddr;
+            if (!btn || !is_valid_address(btn)) continue;
+            
+            std::string name = get_button_name_safe(btn);
+            if (name.empty()) continue;
+            
+            uintptr_t interactableAddr = (uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE;
+            bool isInteractable = false;
+            if (is_valid_address((void*)interactableAddr)) {
+                isInteractable = *(bool*)interactableAddr;
             }
             
-            jstring nameStr = (jstring)env->CallObjectMethod(btnObj, getNameMethod);
-            if (!nameStr) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(btnObj);
-                continue;
+            uintptr_t onClickAddr = (uintptr_t)btn + OFFSET_BUTTON_ONCLICK;
+            bool hasOnClick = false;
+            if (is_valid_address((void*)onClickAddr)) {
+                void* onClick = *(void**)onClickAddr;
+                hasOnClick = (onClick && is_valid_address(onClick));
             }
             
-            const char* nameCStr = env->GetStringUTFChars(nameStr, nullptr);
-            if (nameCStr) {
-                std::string name(nameCStr);
-                env->ReleaseStringUTFChars(nameStr, nameCStr);
-                
-                write_log(g_buttonsLog, "  ─────────────────────────────");
-                write_log(g_buttonsLog, "  📌 Button[" + std::to_string(i) + "]");
-                write_log(g_buttonsLog, "     Name: " + name);
-                write_log(g_buttonsLog, "     JNI Object: 0x" + std::to_string((uintptr_t)btnObj));
-                
-                if (name == "CONNECT" || name == "Connect") {
-                    write_log(g_buttonsLog, "     ⭐ THIS IS THE CONNECT BUTTON!");
-                }
-                found++;
-            }
-            
-            env->DeleteLocalRef(nameStr);
-            env->DeleteLocalRef(btnObj);
+            write_log(g_buttonsLog, "  ─────────────────────────────");
+            write_log(g_buttonsLog, "  📌 Button[" + std::to_string(i) + "]");
+            write_log(g_buttonsLog, "     Name: " + name);
+            write_log(g_buttonsLog, "     Address: 0x" + std::to_string((uintptr_t)btn));
+            write_log(g_buttonsLog, "     Interactable: " + std::string(isInteractable ? "YES" : "NO"));
+            write_log(g_buttonsLog, "     Has onClick: " + std::string(hasOnClick ? "YES" : "NO"));
+            found++;
         }
         
-        write_log(g_buttonsLog, "\n✅ Total buttons logged: " + std::to_string(found));
-        env->DeleteLocalRef(buttonsArray);
+        write_log(g_buttonsLog, "\n✅ Total buttons found: " + std::to_string(found));
         
     } catch (const std::exception& e) {
         write_log(g_buttonsLog, "❌ Exception: " + std::string(e.what()));
@@ -288,106 +252,87 @@ static void FindAllButtonsWithJNI(JNIEnv* env) {
     write_log(g_buttonsLog, "========== DONE ==========\n");
 }
 
-// ======================== کلیک روی CONNECT با JNI (با `env` دریافتی) ========================
-static void ClickConnectWithJNI(JNIEnv* env) {
-    write_log(g_clickLog, "\n========== CLICK CONNECT WITH JNI ==========");
+// ======================== کلیک روی CONNECT (با Invoke) ========================
+static void ClickConnectButton() {
+    write_log(g_clickLog, "\n========== CLICK CONNECT ==========");
     write_log(g_clickLog, "Time: " + get_time());
     
-    if (!env) {
-        write_log(g_clickLog, "❌ JNIEnv is null!");
+    if (!g_gameReady || !g_gtaInstance || !is_valid_address(g_gtaInstance)) {
+        write_log(g_clickLog, "⚠️ Game not ready!");
         write_log(g_clickLog, "========== DONE ==========\n");
         return;
     }
     
     try {
-        jclass buttonClass = env->FindClass("UnityEngine.UI.Button");
-        if (!buttonClass) {
-            env->ExceptionClear();
-            write_log(g_clickLog, "❌ Button class not found!");
+        void* instance = g_gtaInstance;
+        uintptr_t menuButtonsAddr = (uintptr_t)instance + OFFSET_MENU_BUTTONS;
+        if (!is_valid_address((void*)menuButtonsAddr)) {
+            write_log(g_clickLog, "❌ menuButtons address invalid!");
             write_log(g_clickLog, "========== DONE ==========\n");
             return;
         }
         
-        jclass resourcesClass = env->FindClass("UnityEngine.Resources");
-        jmethodID findObjectsMethod = env->GetStaticMethodID(
-            resourcesClass, "FindObjectsOfTypeAll", "(Ljava/lang/Class;)[Ljava/lang/Object;"
-        );
-        if (!findObjectsMethod) {
-            env->ExceptionClear();
-            write_log(g_clickLog, "❌ FindObjectsOfTypeAll method not found!");
+        void** menuButtons = *(void***)menuButtonsAddr;
+        if (!menuButtons || !is_valid_address(menuButtons)) {
+            write_log(g_clickLog, "❌ menuButtons is null!");
             write_log(g_clickLog, "========== DONE ==========\n");
             return;
         }
         
-        jobjectArray buttonsArray = (jobjectArray)env->CallStaticObjectMethod(
-            resourcesClass, findObjectsMethod, buttonClass
-        );
-        if (!buttonsArray) {
-            env->ExceptionClear();
-            write_log(g_clickLog, "❌ No buttons found!");
+        for (int i = 0; i < MAX_BUTTONS; i++) {
+            uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
+            if (!is_valid_address((void*)btnAddr)) continue;
+            
+            void* btn = *(void**)btnAddr;
+            if (!btn || !is_valid_address(btn)) continue;
+            
+            std::string name = get_button_name_safe(btn);
+            if (name != "CONNECT" && name != "Connect") continue;
+            
+            write_log(g_clickLog, "✅ Found CONNECT at index " + std::to_string(i));
+            write_log(g_clickLog, "   Address: 0x" + std::to_string((uintptr_t)btn));
+            
+            // فعال کردن دکمه
+            uintptr_t interactableAddr = (uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE;
+            if (is_valid_address((void*)interactableAddr)) {
+                bool* interactable = (bool*)interactableAddr;
+                *interactable = true;
+                write_log(g_clickLog, "✅ Button enabled");
+            }
+            
+            // گرفتن onClick
+            uintptr_t onClickAddr = (uintptr_t)btn + OFFSET_BUTTON_ONCLICK;
+            if (!is_valid_address((void*)onClickAddr)) {
+                write_log(g_clickLog, "❌ onClick address invalid!");
+                write_log(g_clickLog, "========== DONE ==========\n");
+                return;
+            }
+            
+            void* onClick = *(void**)onClickAddr;
+            if (!onClick || !is_valid_address(onClick)) {
+                write_log(g_clickLog, "❌ onClick is null!");
+                write_log(g_clickLog, "========== DONE ==========\n");
+                return;
+            }
+            write_log(g_clickLog, "✅ onClick: 0x" + std::to_string((uintptr_t)onClick));
+            
+            // صدا زدن Invoke
+            typedef void (*invoke_t)(void*);
+            invoke_t Invoke = (invoke_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E8482C"));
+            if (!Invoke) {
+                write_log(g_clickLog, "❌ Invoke not found!");
+                write_log(g_clickLog, "========== DONE ==========\n");
+                return;
+            }
+            
+            write_log(g_clickLog, "🔄 Calling Invoke() on CONNECT...");
+            Invoke(onClick);
+            write_log(g_clickLog, "✅ Invoke() called successfully!");
             write_log(g_clickLog, "========== DONE ==========\n");
             return;
         }
         
-        jsize buttonCount = env->GetArrayLength(buttonsArray);
-        bool foundConnect = false;
-        
-        for (int i = 0; i < buttonCount; i++) {
-            jobject btnObj = env->GetObjectArrayElement(buttonsArray, i);
-            if (!btnObj) continue;
-            
-            jclass btnClass = env->GetObjectClass(btnObj);
-            jmethodID getNameMethod = env->GetMethodID(btnClass, "get_name", "()Ljava/lang/String;");
-            if (!getNameMethod) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(btnObj);
-                continue;
-            }
-            
-            jstring nameStr = (jstring)env->CallObjectMethod(btnObj, getNameMethod);
-            if (!nameStr) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(btnObj);
-                continue;
-            }
-            
-            const char* nameCStr = env->GetStringUTFChars(nameStr, nullptr);
-            if (nameCStr) {
-                std::string name(nameCStr);
-                env->ReleaseStringUTFChars(nameStr, nameCStr);
-                
-                if (name == "CONNECT" || name == "Connect") {
-                    write_log(g_clickLog, "✅ Found CONNECT button!");
-                    write_log(g_clickLog, "   JNI Object: 0x" + std::to_string((uintptr_t)btnObj));
-                    
-                    jfieldID onClickField = env->GetFieldID(btnClass, "m_OnClick", "LUnityEngine/UI/Button$ButtonClickedEvent;");
-                    if (onClickField) {
-                        jobject onClickObj = env->GetObjectField(btnObj, onClickField);
-                        if (onClickObj) {
-                            jclass unityEventClass = env->FindClass("UnityEngine/Events/UnityEvent");
-                            jmethodID invokeMethod = env->GetMethodID(unityEventClass, "Invoke", "()V");
-                            if (invokeMethod) {
-                                write_log(g_clickLog, "🔄 Calling UnityEvent.Invoke() via JNI...");
-                                env->CallVoidMethod(onClickObj, invokeMethod);
-                                write_log(g_clickLog, "✅ Invoke() called successfully!");
-                            }
-                            env->DeleteLocalRef(onClickObj);
-                        }
-                    }
-                    
-                    foundConnect = true;
-                    env->DeleteLocalRef(btnObj);
-                    break;
-                }
-            }
-            env->DeleteLocalRef(btnObj);
-        }
-        
-        if (!foundConnect) {
-            write_log(g_clickLog, "❌ CONNECT button not found!");
-        }
-        
-        env->DeleteLocalRef(buttonsArray);
+        write_log(g_clickLog, "❌ CONNECT button not found!");
         
     } catch (const std::exception& e) {
         write_log(g_clickLog, "❌ Exception: " + std::string(e.what()));
@@ -406,8 +351,12 @@ void hook_OnPointerClick(void* button, void* eventData) {
         if (!name.empty()) {
             write_log(g_clickLog, "🖱️ Button clicked: " + name);
             write_log(g_clickLog, "   Address: 0x" + std::to_string((uintptr_t)button));
+            write_log(g_clickLog, "   Time: " + get_time());
+        } else {
+            write_log(g_clickLog, "🖱️ Button clicked (unknown): 0x" + std::to_string((uintptr_t)button));
         }
     }
+    
     if (orig_OnPointerClick) {
         orig_OnPointerClick(button, eventData);
     }
@@ -429,10 +378,12 @@ void hook_GtaMenuStart(void *instance) {
     }
 }
 
-// ======================== نصب هوک‌ها ========================
+// ======================== نصب هوک‌ها با تأخیر ========================
 static void install_hooks_with_delay() {
     write_log(g_buttonsLog, "⏳ Waiting for game to load...");
+    write_debug("⏳ Waiting for game to load...");
     
+    // مرحله 1: صبر کن تا libil2cpp.so لود بشه
     int waitCount = 0;
     while (!isLibraryLoaded(targetLibName) && waitCount < MAX_WAIT) {
         sleep(1);
@@ -440,11 +391,14 @@ static void install_hooks_with_delay() {
     }
     
     if (waitCount >= MAX_WAIT) {
-        write_log(g_buttonsLog, "❌ Timeout!");
+        write_log(g_buttonsLog, "❌ Timeout! libil2cpp.so not loaded!");
+        write_debug("❌ Timeout!");
         return;
     }
     write_log(g_buttonsLog, "✅ libil2cpp.so loaded");
+    write_debug("✅ libil2cpp.so loaded");
     
+    // مرحله 2: صبر کن تا GtaMenuControl instance ساخته بشه
     waitCount = 0;
     while (waitCount < MAX_WAIT) {
         void* instance = get_gta_instance_safe();
@@ -452,36 +406,69 @@ static void install_hooks_with_delay() {
             g_gtaInstance = instance;
             g_gameReady = true;
             write_log(g_buttonsLog, "✅ GtaMenuControl instance ready!");
+            write_debug("✅ GtaMenuControl instance ready!");
             break;
         }
         sleep(1);
         waitCount++;
     }
     
-#if defined(__aarch64__)
-    void* onPointerClickAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F04A60"));
-    if (onPointerClickAddr && is_valid_address(onPointerClickAddr)) {
-        DobbyHook(onPointerClickAddr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
-        write_log(g_buttonsLog, "✅ OnPointerClick hooked");
+    if (!g_gameReady) {
+        write_log(g_buttonsLog, "⚠️ No instance yet, will use hook");
     }
     
+    // مرحله 3: نصب هوک‌ها
+#if defined(__aarch64__)
+    // هوک OnPointerClick (آفست 0x1F08A60)
+    void* onPointerClickAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F08A60"));
+    if (onPointerClickAddr && is_valid_address(onPointerClickAddr)) {
+        int res = DobbyHook(onPointerClickAddr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
+        if (res == 0) {
+            write_log(g_buttonsLog, "✅ OnPointerClick hooked");
+            write_debug("✅ OnPointerClick hooked");
+        } else {
+            write_log(g_buttonsLog, "❌ OnPointerClick hook failed: " + std::to_string(res));
+            write_debug("❌ OnPointerClick hook failed");
+        }
+    } else {
+        write_log(g_buttonsLog, "❌ OnPointerClick address not found");
+        write_debug("❌ OnPointerClick address not found");
+    }
+    
+    // هوک GtaMenuControl.Start
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr && is_valid_address(startAddr)) {
-        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        write_log(g_buttonsLog, "✅ GtaMenuControl.Start() hooked");
+        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        if (res == 0) {
+            write_log(g_buttonsLog, "✅ GtaMenuControl.Start() hooked");
+            write_debug("✅ GtaMenuControl.Start() hooked");
+        } else {
+            write_log(g_buttonsLog, "❌ GtaMenuControl.Start() hook failed: " + std::to_string(res));
+            write_debug("❌ GtaMenuControl.Start() hook failed");
+        }
+    } else {
+        write_log(g_buttonsLog, "❌ GtaMenuControl.Start() address not found");
+        write_debug("❌ GtaMenuControl.Start() address not found");
     }
 #endif
     
     g_hooksInstalled = true;
-    write_log(g_buttonsLog, "✅ Mod ready!");
+    
+    if (g_gameReady) {
+        write_log(g_buttonsLog, "✅ Mod ready! All hooks installed.");
+        write_debug("✅ Mod ready!");
+    } else {
+        write_log(g_buttonsLog, "✅ Mod loaded, waiting for game to start...");
+        write_debug("✅ Mod loaded, waiting for game to start...");
+    }
 }
 
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
-        "Category_🔍 Button Tools (JNI)",
-        "Button_📋 Find All Buttons (JNI)",
-        "Button_🔄 Click CONNECT (JNI)",
+        "Category_🔍 Button Tools",
+        "Button_📋 Show All Buttons",
+        "Button_🔄 Click CONNECT (via Invoke)",
         "Button_📊 Show Status",
         "RichTextView_📁 Logs: /sdcard/Download/lac/",
         "RichTextView_📌 buttons_list.txt | click_log.txt",
@@ -501,12 +488,12 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
     
     switch (featNum) {
         case 0:
-            write_log(g_buttonsLog, "🔘 Find All Buttons (JNI) pressed");
-            FindAllButtonsWithJNI(env);
+            write_log(g_buttonsLog, "🔘 Show All Buttons pressed");
+            ShowAllButtons();
             break;
         case 1:
-            write_log(g_buttonsLog, "🔘 Click CONNECT (JNI) pressed");
-            ClickConnectWithJNI(env);
+            write_log(g_buttonsLog, "🔘 Click CONNECT pressed");
+            ClickConnectButton();
             break;
         case 2:
             write_log(g_buttonsLog, "📊 Status");
@@ -528,6 +515,10 @@ __attribute__((constructor))
 void lib_main() {
     mkdir(g_basePath.c_str(), 0777);
     install_crash_handler();
+    
     write_log(g_buttonsLog, "🚀 Mod loaded");
+    write_log(g_buttonsLog, "⏳ Starting initialization...");
+    write_debug("🚀 lib_main called");
+    
     std::thread(hack_thread).detach();
 }
