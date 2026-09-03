@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <vector>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -19,13 +21,18 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌های نهایی ========================
+// ======================== آفست‌ها ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_ONPOINTERCLICK           0x1F04A60   // ✅ UnityEngine.UI.Button.OnPointerClick
+
+// ====== روش‌های مختلف هوک ======
+#define OFFSET_ONPOINTERCLICK           0x1F08A60   // روش 1: OnPointerClick
+#define OFFSET_PRESS                    0x1F04A60   // روش 2: Press
+#define OFFSET_UNITYACTION_INVOKE       0x1E8482C   // روش 3: UnityAction.Invoke
+#define OFFSET_UNITYEVENT_INVOKE        0x1E84848   // روش 4: UnityEvent.Invoke
 
 #define MAX_WAIT 30
 
@@ -36,10 +43,26 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 
 static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
-static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
-static bool g_captureEnabled = false;
-static JNIEnv* g_env = nullptr;  // JNIEnv ذخیره شده از Changes
+static JNIEnv* g_env = nullptr;
+
+// ====== وضعیت هر روش ======
+static bool g_method1_on = false;  // OnPointerClick
+static bool g_method2_on = false;  // Press
+static bool g_method3_on = false;  // UnityAction.Invoke
+static bool g_method4_on = false;  // UnityEvent.Invoke
+
+// ====== پوینترهای توابع اصلی ======
+void (*orig_OnPointerClick)(void* button, void* eventData);
+void (*orig_Press)(void* button);
+void (*orig_UnityAction_Invoke)(void* action);
+void (*orig_UnityEvent_Invoke)(void* unityEvent);
+
+// ====== متغیرهای کنترل هوک ======
+static bool g_hook1_installed = false;
+static bool g_hook2_installed = false;
+static bool g_hook3_installed = false;
+static bool g_hook4_installed = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -63,7 +86,7 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast با استفاده از JNIEnv ذخیره شده ========================
+// ======================== Toast ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("❌ JNIEnv not available for Toast");
@@ -71,77 +94,65 @@ static void show_toast(const std::string& msg) {
     }
     
     JNIEnv* env = g_env;
-    
     jclass toastClass = env->FindClass("android/widget/Toast");
     if (!toastClass) {
         env->ExceptionClear();
-        write_debug("❌ Toast class not found");
         return;
     }
     
     jmethodID makeTextMethod = env->GetStaticMethodID(toastClass, "makeText", "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
     if (!makeTextMethod) {
         env->ExceptionClear();
-        write_debug("❌ Toast.makeText not found");
         return;
     }
     
-    // گرفتن Application Context
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
-        write_debug("❌ ActivityThread class not found");
         return;
     }
     
     jmethodID currentActivityThreadMethod = env->GetStaticMethodID(activityThreadClass, "currentActivityThread", "()Landroid/app/ActivityThread;");
     if (!currentActivityThreadMethod) {
         env->ExceptionClear();
-        write_debug("❌ currentActivityThread not found");
         return;
     }
     
     jobject activityThread = env->CallStaticObjectMethod(activityThreadClass, currentActivityThreadMethod);
     if (!activityThread) {
         env->ExceptionClear();
-        write_debug("❌ ActivityThread is null");
         return;
     }
     
     jmethodID getApplicationMethod = env->GetMethodID(activityThreadClass, "getApplication", "()Landroid/app/Application;");
     if (!getApplicationMethod) {
         env->ExceptionClear();
-        write_debug("❌ getApplication not found");
         return;
     }
     
     jobject context = env->CallObjectMethod(activityThread, getApplicationMethod);
     if (!context) {
         env->ExceptionClear();
-        write_debug("❌ Application context is null");
         return;
     }
     
     jstring jMsg = env->NewStringUTF(msg.c_str());
     if (!jMsg) {
         env->ExceptionClear();
-        write_debug("❌ Failed to create jstring");
         return;
     }
     
-    jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0); // 0 = LENGTH_SHORT
+    jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0);
     env->DeleteLocalRef(jMsg);
     
     if (!toast) {
         env->ExceptionClear();
-        write_debug("❌ Toast.makeText returned null");
         return;
     }
     
     jmethodID showMethod = env->GetMethodID(toastClass, "show", "()V");
     if (!showMethod) {
         env->ExceptionClear();
-        write_debug("❌ Toast.show not found");
         return;
     }
     
@@ -151,7 +162,7 @@ static void show_toast(const std::string& msg) {
     env->DeleteLocalRef(activityThread);
 }
 
-// ======================== کرش‌گیر کامل ========================
+// ======================== کرش‌گیر ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -198,7 +209,7 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== توابع IL2CPP امن ========================
+// ======================== توابع IL2CPP ========================
 static void* create_mono_string(const char* str) {
     if (!str) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -244,13 +255,11 @@ static void* get_gta_instance_safe() {
 
 static std::string get_button_name_safe(void* btn) {
     if (!btn || !is_valid_address(btn)) return "";
-    // روش 1: از GameObject.m_Name (آفست 0x20)
     void* namePtr = *(void**)((uintptr_t)btn + OFFSET_GAMEOBJECT_NAME);
     if (namePtr && is_valid_address(namePtr)) {
         std::string name = mono_to_string_safe(namePtr);
         if (!name.empty()) return name;
     }
-    // روش 2: از UnityEngine.Object.get_name (آفست 0x1E7CE6C)
     typedef void* (*get_name_t)(void*);
     get_name_t get_name = (get_name_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E7CE6C"));
     if (get_name) {
@@ -262,28 +271,48 @@ static std::string get_button_name_safe(void* btn) {
     return "";
 }
 
-// ======================== هوک OnPointerClick ========================
-void (*orig_OnPointerClick)(void* button, void* eventData);
+// ======================== هوک‌ها ========================
+
+// ----- روش 1: OnPointerClick -----
 void hook_OnPointerClick(void* button, void* eventData) {
-    if (g_captureEnabled && g_gameReady && button && is_valid_address(button)) {
+    if (g_method1_on && g_gameReady && button && is_valid_address(button)) {
         std::string name = get_button_name_safe(button);
         if (!name.empty()) {
-            std::string msg = "🖱️ " + name;
-            show_toast(msg);
-            write_log(g_clickLog, "🖱️ Button clicked: " + name);
-            write_log(g_clickLog, "   Address: 0x" + std::to_string((uintptr_t)button));
-            write_log(g_clickLog, "   Time: " + get_time());
-        } else {
-            std::string msg = "🖱️ Button: 0x" + std::to_string((uintptr_t)button);
-            show_toast(msg);
-            write_log(g_clickLog, "🖱️ Button clicked (unknown): 0x" + std::to_string((uintptr_t)button));
+            show_toast("🔵 " + name);
+            write_log(g_clickLog, "[Method1-OnPointerClick] " + name + " | 0x" + std::to_string((uintptr_t)button));
         }
     }
-    
-    // اجرای تابع اصلی
-    if (orig_OnPointerClick) {
-        orig_OnPointerClick(button, eventData);
+    if (orig_OnPointerClick) orig_OnPointerClick(button, eventData);
+}
+
+// ----- روش 2: Press -----
+void hook_Press(void* button) {
+    if (g_method2_on && g_gameReady && button && is_valid_address(button)) {
+        std::string name = get_button_name_safe(button);
+        if (!name.empty()) {
+            show_toast("🟢 " + name);
+            write_log(g_clickLog, "[Method2-Press] " + name + " | 0x" + std::to_string((uintptr_t)button));
+        }
     }
+    if (orig_Press) orig_Press(button);
+}
+
+// ----- روش 3: UnityAction.Invoke -----
+void hook_UnityAction_Invoke(void* action) {
+    if (g_method3_on && g_gameReady && action && is_valid_address(action)) {
+        write_log(g_clickLog, "[Method3-UnityAction] Action: 0x" + std::to_string((uintptr_t)action));
+        show_toast("🟡 UnityAction");
+    }
+    if (orig_UnityAction_Invoke) orig_UnityAction_Invoke(action);
+}
+
+// ----- روش 4: UnityEvent.Invoke -----
+void hook_UnityEvent_Invoke(void* unityEvent) {
+    if (g_method4_on && g_gameReady && unityEvent && is_valid_address(unityEvent)) {
+        write_log(g_clickLog, "[Method4-UnityEvent] Event: 0x" + std::to_string((uintptr_t)unityEvent));
+        show_toast("🟠 UnityEvent");
+    }
+    if (orig_UnityEvent_Invoke) orig_UnityEvent_Invoke(unityEvent);
 }
 
 // ======================== هوک GtaMenuControl.Start ========================
@@ -293,16 +322,198 @@ void hook_GtaMenuStart(void *instance) {
         g_gtaInstance = instance;
         if (!g_gameReady) {
             g_gameReady = true;
-            write_debug("✅ Game ready! (GtaMenuControl.Start hooked)");
+            write_debug("✅ Game ready!");
         }
     }
-    if (orig_GtaMenuStart) {
-        orig_GtaMenuStart(instance);
+    if (orig_GtaMenuStart) orig_GtaMenuStart(instance);
+}
+
+// ======================== نصب/برداشتن هوک‌ها ========================
+static void install_all_hooks() {
+#if defined(__aarch64__)
+    // روش 1: OnPointerClick
+    if (!g_hook1_installed) {
+        void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F08A60"));
+        if (addr && is_valid_address(addr)) {
+            if (DobbyHook(addr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick) == 0) {
+                g_hook1_installed = true;
+                write_debug("✅ Method1 (OnPointerClick) hooked");
+            }
+        }
+    }
+    
+    // روش 2: Press
+    if (!g_hook2_installed) {
+        void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F04A60"));
+        if (addr && is_valid_address(addr)) {
+            if (DobbyHook(addr, (dobby_dummy_func_t)hook_Press, (dobby_dummy_func_t*)&orig_Press) == 0) {
+                g_hook2_installed = true;
+                write_debug("✅ Method2 (Press) hooked");
+            }
+        }
+    }
+    
+    // روش 3: UnityAction.Invoke (با احتیاط)
+    if (!g_hook3_installed) {
+        void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1E8482C"));
+        if (addr && is_valid_address(addr)) {
+            if (DobbyHook(addr, (dobby_dummy_func_t)hook_UnityAction_Invoke, (dobby_dummy_func_t*)&orig_UnityAction_Invoke) == 0) {
+                g_hook3_installed = true;
+                write_debug("✅ Method3 (UnityAction.Invoke) hooked");
+            }
+        }
+    }
+    
+    // روش 4: UnityEvent.Invoke
+    if (!g_hook4_installed) {
+        void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1E84848"));
+        if (addr && is_valid_address(addr)) {
+            if (DobbyHook(addr, (dobby_dummy_func_t)hook_UnityEvent_Invoke, (dobby_dummy_func_t*)&orig_UnityEvent_Invoke) == 0) {
+                g_hook4_installed = true;
+                write_debug("✅ Method4 (UnityEvent.Invoke) hooked");
+            }
+        }
+    }
+#endif
+    
+    // هوک GtaMenuControl.Start
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr && is_valid_address(startAddr)) {
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
     }
 }
 
-// ======================== نصب هوک‌ها با تأخیر ========================
-static void install_hooks_with_delay() {
+// ======================== تابع تست دکمه‌ها (با JNI) ========================
+static void TestFindButtons() {
+    if (!g_env) {
+        write_log(g_clickLog, "❌ JNIEnv not available");
+        return;
+    }
+    
+    JNIEnv* env = g_env;
+    jclass buttonClass = env->FindClass("UnityEngine.UI.Button");
+    if (!buttonClass) {
+        env->ExceptionClear();
+        write_log(g_clickLog, "❌ Button class not found");
+        return;
+    }
+    
+    jclass resourcesClass = env->FindClass("UnityEngine.Resources");
+    if (!resourcesClass) {
+        env->ExceptionClear();
+        write_log(g_clickLog, "❌ Resources class not found");
+        return;
+    }
+    
+    jmethodID findObjectsMethod = env->GetStaticMethodID(resourcesClass, "FindObjectsOfTypeAll", "(Ljava/lang/Class;)[Ljava/lang/Object;");
+    if (!findObjectsMethod) {
+        env->ExceptionClear();
+        write_log(g_clickLog, "❌ FindObjectsOfTypeAll not found");
+        return;
+    }
+    
+    jobjectArray buttons = (jobjectArray)env->CallStaticObjectMethod(resourcesClass, findObjectsMethod, buttonClass);
+    if (!buttons) {
+        env->ExceptionClear();
+        write_log(g_clickLog, "❌ No buttons found");
+        return;
+    }
+    
+    jsize count = env->GetArrayLength(buttons);
+    write_log(g_clickLog, "📊 Total buttons: " + std::to_string(count));
+    
+    for (int i = 0; i < count && i < 50; i++) {
+        jobject btn = env->GetObjectArrayElement(buttons, i);
+        if (!btn) continue;
+        
+        jclass btnClass = env->GetObjectClass(btn);
+        jmethodID getName = env->GetMethodID(btnClass, "get_name", "()Ljava/lang/String;");
+        if (!getName) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(btn);
+            continue;
+        }
+        
+        jstring nameStr = (jstring)env->CallObjectMethod(btn, getName);
+        if (!nameStr) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(btn);
+            continue;
+        }
+        
+        const char* nameC = env->GetStringUTFChars(nameStr, nullptr);
+        if (nameC) {
+            write_log(g_clickLog, "  Button[" + std::to_string(i) + "] = " + std::string(nameC));
+            env->ReleaseStringUTFChars(nameStr, nameC);
+        }
+        env->DeleteLocalRef(nameStr);
+        env->DeleteLocalRef(btn);
+    }
+    
+    env->DeleteLocalRef(buttons);
+    write_log(g_clickLog, "✅ Test complete");
+}
+
+// ======================== منو ========================
+jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
+    g_env = env;
+    
+    const char *features[] = {
+        "Category_🎯 Capture Methods",
+        "Toggle_Method1: OnPointerClick",
+        "Toggle_Method2: Press",
+        "Toggle_Method3: UnityAction.Invoke",
+        "Toggle_Method4: UnityEvent.Invoke",
+        "Button_🔍 Test Find All Buttons",
+        "RichTextView_📁 Logs: /sdcard/Download/lac/",
+        "RichTextView_📌 click_log.txt | mod_debug.txt",
+    };
+    int total = sizeof(features) / sizeof(features[0]);
+    jobjectArray ret = (jobjectArray)env->NewObjectArray(
+        total, env->FindClass("java/lang/String"), env->NewStringUTF("")
+    );
+    for (int i = 0; i < total; i++) {
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+    }
+    return ret;
+}
+
+void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
+             jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
+    
+    g_env = env;
+    std::string status = boolean ? "ON ✅" : "OFF ❌";
+    
+    switch (featNum) {
+        case 0:
+            g_method1_on = boolean;
+            write_log(g_clickLog, "Method1 (OnPointerClick): " + status);
+            show_toast("Method1 " + status);
+            break;
+        case 1:
+            g_method2_on = boolean;
+            write_log(g_clickLog, "Method2 (Press): " + status);
+            show_toast("Method2 " + status);
+            break;
+        case 2:
+            g_method3_on = boolean;
+            write_log(g_clickLog, "Method3 (UnityAction.Invoke): " + status);
+            show_toast("Method3 " + status);
+            break;
+        case 3:
+            g_method4_on = boolean;
+            write_log(g_clickLog, "Method4 (UnityEvent.Invoke): " + status);
+            show_toast("Method4 " + status);
+            break;
+        case 4:
+            write_log(g_clickLog, "🔍 Test Find All Buttons");
+            TestFindButtons();
+            break;
+    }
+}
+
+// ======================== ترد اصلی ========================
+void hack_thread() {
     write_debug("⏳ Waiting for game to load...");
     
     int waitCount = 0;
@@ -312,7 +523,7 @@ static void install_hooks_with_delay() {
     }
     
     if (waitCount >= MAX_WAIT) {
-        write_debug("❌ Timeout! libil2cpp.so not loaded!");
+        write_debug("❌ Timeout!");
         return;
     }
     write_debug("✅ libil2cpp.so loaded");
@@ -330,82 +541,8 @@ static void install_hooks_with_delay() {
         waitCount++;
     }
     
-    if (!g_gameReady) {
-        write_debug("⚠️ No instance yet, will use hook");
-    }
-    
-#if defined(__aarch64__)
-    // هوک OnPointerClick (آفست 0x1F04A60)
-    void* onPointerClickAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F04A60"));
-    if (onPointerClickAddr && is_valid_address(onPointerClickAddr)) {
-        int res = DobbyHook(onPointerClickAddr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
-        if (res == 0) {
-            write_debug("✅ OnPointerClick hooked");
-        } else {
-            write_debug("❌ OnPointerClick hook failed: " + std::to_string(res));
-        }
-    } else {
-        write_debug("❌ OnPointerClick address not found");
-    }
-    
-    // هوک GtaMenuControl.Start
-    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
-    if (startAddr && is_valid_address(startAddr)) {
-        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        if (res == 0) {
-            write_debug("✅ GtaMenuControl.Start() hooked");
-        } else {
-            write_debug("❌ GtaMenuControl.Start() hook failed: " + std::to_string(res));
-        }
-    } else {
-        write_debug("❌ GtaMenuControl.Start() address not found");
-    }
-#endif
-    
-    g_hooksInstalled = true;
+    install_all_hooks();
     write_debug("✅ Mod ready!");
-}
-
-// ======================== منو ========================
-jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    const char *features[] = {
-        "Category_🎯 Button Capture",
-        "Toggle_Capture Mode",
-        "RichTextView_📁 Logs: /sdcard/Download/lac/",
-        "RichTextView_📌 click_log.txt",
-    };
-    int total = sizeof(features) / sizeof(features[0]);
-    jobjectArray ret = (jobjectArray)env->NewObjectArray(
-        total, env->FindClass("java/lang/String"), env->NewStringUTF("")
-    );
-    for (int i = 0; i < total; i++) {
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
-    }
-    return ret;
-}
-
-void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
-             jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
-    
-    // ذخیره JNIEnv برای استفاده در Toast
-    g_env = env;
-    
-    if (featNum == 0) {
-        g_captureEnabled = boolean;
-        if (g_captureEnabled) {
-            show_toast("🔴 Capture ON");
-            write_debug("🔴 Capture mode enabled");
-        } else {
-            show_toast("⚫ Capture OFF");
-            write_debug("⚫ Capture mode disabled");
-        }
-        write_log(g_clickLog, "📌 Capture mode: " + std::string(g_captureEnabled ? "ON" : "OFF"));
-    }
-}
-
-void hack_thread() {
-    install_hooks_with_delay();
-    write_debug("✅ hack_thread finished");
 }
 
 __attribute__((constructor))
