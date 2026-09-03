@@ -30,11 +30,11 @@
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_UNITYACTION_INVOKE       0x1E8482C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
+#define OFFSET_GAMEOBJECT_NAME          0x20          // GameObject.m_Name (String)
 
 #define MAX_BUTTONS 30
 #define MAX_WAIT 30
 
-// ======================== مسیرها ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_buttonsLog = g_basePath + "buttons_list.txt";
 static std::string g_clickLog = g_basePath + "click_log.txt";
@@ -105,7 +105,21 @@ static void install_crash_handler() {
     write_debug("✅ Crash handler installed");
 }
 
-// ======================== توابع IL2CPP ========================
+// ======================== توابع امنیت حافظه ========================
+static bool is_valid_address(void* addr) {
+    if (!addr) return false;
+    uintptr_t ptr = (uintptr_t)addr;
+    if (ptr < 0x1000) return false;
+    if (ptr > 0x7FFFFFFFFFFFFF) return false;
+    auto map = KittyMemory::getAddressMap(addr);
+    return map.readable;
+}
+
+static bool is_valid_pointer(void* ptr) {
+    return is_valid_address(ptr);
+}
+
+// ======================== توابع IL2CPP امن ========================
 static void* create_mono_string(const char* str) {
     if (!str) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -115,30 +129,27 @@ static void* create_mono_string(const char* str) {
     return il2cpp_string_new(str);
 }
 
-static std::string mono_to_string(void* monoStr) {
-    if (!monoStr) return "";
+static std::string mono_to_string_safe(void* monoStr) {
+    if (!monoStr || !is_valid_address(monoStr)) return "";
+    
     typedef int32_t (*len_t)(void*);
     typedef uint16_t* (*chars_t)(void*);
     len_t get_len = (len_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
     chars_t get_chars = (chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
     if (!get_len || !get_chars) return "";
+    
     int len = get_len(monoStr);
     if (len <= 0 || len > 65536) return "";
+    
     uint16_t* chars = get_chars(monoStr);
-    if (!chars) return "";
+    if (!chars || !is_valid_address(chars)) return "";
+    
     std::string result;
     result.reserve(len);
-    for (int i = 0; i < len; i++) result += (char)(chars[i] & 0xFF);
+    for (int i = 0; i < len; i++) {
+        result += (char)(chars[i] & 0xFF);
+    }
     return result;
-}
-
-static bool is_valid_address(void* addr) {
-    if (!addr) return false;
-    uintptr_t ptr = (uintptr_t)addr;
-    if (ptr < 0x1000) return false;
-    if (ptr > 0x7FFFFFFFFFFFFF) return false;
-    auto map = KittyMemory::getAddressMap(addr);
-    return map.readable;
 }
 
 static void* get_gta_instance_safe() {
@@ -159,22 +170,35 @@ static void* get_gta_instance_safe() {
 }
 
 static std::string get_button_name_safe(void* btn) {
-    if (!btn || !is_valid_address(btn)) return "(invalid)";
+    if (!btn || !is_valid_address(btn)) return "";
+    
+    // روش اول: از GameObject.name (آفست 0x20)
+    void* namePtr = *(void**)((uintptr_t)btn + OFFSET_GAMEOBJECT_NAME);
+    if (namePtr && is_valid_address(namePtr)) {
+        std::string name = mono_to_string_safe(namePtr);
+        if (!name.empty()) return name;
+    }
+    
+    // روش دوم: از UnityEngine.Object.get_name (آفست 0x1E7CE6C)
     typedef void* (*get_name_t)(void*);
     get_name_t get_name = (get_name_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E7CE6C"));
-    if (!get_name) return "(error)";
-    void* monoStr = get_name(btn);
-    return mono_to_string(monoStr);
+    if (get_name) {
+        void* monoStr = get_name(btn);
+        if (monoStr && is_valid_address(monoStr)) {
+            return mono_to_string_safe(monoStr);
+        }
+    }
+    
+    return "";
 }
 
-// ======================== نمایش همه دکمه‌ها ========================
+// ======================== نمایش همه دکمه‌ها (امن) ========================
 static void ShowAllButtons() {
     write_log(g_buttonsLog, "\n========== ALL BUTTONS ==========");
     write_log(g_buttonsLog, "Time: " + get_time());
     
-    // چک کن بازی آماده هست یا نه
     if (!g_gameReady || !g_gtaInstance || !is_valid_address(g_gtaInstance)) {
-        write_log(g_buttonsLog, "⚠️ Game not ready yet! Wait for initialization.");
+        write_log(g_buttonsLog, "⚠️ Game not ready!");
         write_log(g_buttonsLog, "========== DONE ==========\n");
         return;
     }
@@ -183,7 +207,15 @@ static void ShowAllButtons() {
         void* instance = g_gtaInstance;
         write_log(g_buttonsLog, "✅ Instance: 0x" + std::to_string((uintptr_t)instance));
         
-        void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
+        // خواندن menuButtons با چک امنیت
+        uintptr_t menuButtonsAddr = (uintptr_t)instance + OFFSET_MENU_BUTTONS;
+        if (!is_valid_address((void*)menuButtonsAddr)) {
+            write_log(g_buttonsLog, "❌ menuButtons address invalid!");
+            write_log(g_buttonsLog, "========== DONE ==========\n");
+            return;
+        }
+        
+        void** menuButtons = *(void***)menuButtonsAddr;
         if (!menuButtons || !is_valid_address(menuButtons)) {
             write_log(g_buttonsLog, "❌ menuButtons is null or invalid!");
             write_log(g_buttonsLog, "========== DONE ==========\n");
@@ -193,17 +225,31 @@ static void ShowAllButtons() {
         
         int found = 0;
         for (int i = 0; i < MAX_BUTTONS; i++) {
-            void* btn = menuButtons[i];
+            // خواندن هر دکمه با چک امنیت
+            uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
+            if (!is_valid_address((void*)btnAddr)) continue;
+            
+            void* btn = *(void**)btnAddr;
             if (!btn || !is_valid_address(btn)) continue;
             
+            // گرفتن اسم دکمه
             std::string name = get_button_name_safe(btn);
-            if (name.empty() || name == "(invalid)" || name == "(error)") continue;
+            if (name.empty()) continue;
             
-            bool* interactable = (bool*)((uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE);
-            bool isInteractable = (interactable && is_valid_address(interactable) && *interactable);
+            // گرفتن interactable (آفست 0xD8)
+            uintptr_t interactableAddr = (uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE;
+            bool isInteractable = false;
+            if (is_valid_address((void*)interactableAddr)) {
+                isInteractable = *(bool*)interactableAddr;
+            }
             
-            void* onClick = *(void**)((uintptr_t)btn + OFFSET_BUTTON_ONCLICK);
-            bool hasOnClick = (onClick && is_valid_address(onClick));
+            // گرفتن onClick (آفست 0x100)
+            uintptr_t onClickAddr = (uintptr_t)btn + OFFSET_BUTTON_ONCLICK;
+            bool hasOnClick = false;
+            if (is_valid_address((void*)onClickAddr)) {
+                void* onClick = *(void**)onClickAddr;
+                hasOnClick = (onClick && is_valid_address(onClick));
+            }
             
             write_log(g_buttonsLog, "  ─────────────────────────────");
             write_log(g_buttonsLog, "  📌 Button[" + std::to_string(i) + "]");
@@ -216,38 +262,46 @@ static void ShowAllButtons() {
         
         write_log(g_buttonsLog, "\n✅ Total buttons found: " + std::to_string(found));
         
-    } catch (const std::exception& e) {
-        write_log(g_buttonsLog, "❌ Exception: " + std::string(e.what()));
     } catch (...) {
-        write_log(g_buttonsLog, "❌ Unknown exception!");
+        write_log(g_buttonsLog, "❌ Exception occurred!");
     }
     
     write_log(g_buttonsLog, "========== DONE ==========\n");
 }
 
-// ======================== کلیک روی دکمه CONNECT ========================
+// ======================== کلیک روی CONNECT (امن) ========================
 static void ClickConnectButton() {
     write_log(g_clickLog, "\n========== CLICK CONNECT ==========");
     write_log(g_clickLog, "Time: " + get_time());
     
     if (!g_gameReady || !g_gtaInstance || !is_valid_address(g_gtaInstance)) {
-        write_log(g_clickLog, "⚠️ Game not ready yet! Wait for initialization.");
+        write_log(g_clickLog, "⚠️ Game not ready!");
         write_log(g_clickLog, "========== DONE ==========\n");
         return;
     }
     
     try {
         void* instance = g_gtaInstance;
-        void** menuButtons = *(void***)((uintptr_t)instance + OFFSET_MENU_BUTTONS);
-        if (!menuButtons || !is_valid_address(menuButtons)) {
-            write_log(g_clickLog, "❌ menuButtons is null!");
+        uintptr_t menuButtonsAddr = (uintptr_t)instance + OFFSET_MENU_BUTTONS;
+        if (!is_valid_address((void*)menuButtonsAddr)) {
+            write_log(g_clickLog, "❌ menuButtons address invalid!");
             write_log(g_clickLog, "========== DONE ==========\n");
             return;
         }
         
-        // پیدا کردن دکمه CONNECT
+        void** menuButtons = *(void***)menuButtonsAddr;
+        if (!menuButtons || !is_valid_address(menuButtons)) {
+            write_log(g_clickLog, "❌ menuButtons is null or invalid!");
+            write_log(g_clickLog, "========== DONE ==========\n");
+            return;
+        }
+        
+        // پیدا کردن CONNECT
         for (int i = 0; i < MAX_BUTTONS; i++) {
-            void* btn = menuButtons[i];
+            uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
+            if (!is_valid_address((void*)btnAddr)) continue;
+            
+            void* btn = *(void**)btnAddr;
             if (!btn || !is_valid_address(btn)) continue;
             
             std::string name = get_button_name_safe(btn);
@@ -256,15 +310,25 @@ static void ClickConnectButton() {
             write_log(g_clickLog, "✅ Found CONNECT at index " + std::to_string(i));
             write_log(g_clickLog, "   Address: 0x" + std::to_string((uintptr_t)btn));
             
-            // فعال کردن دکمه
-            bool* interactable = (bool*)((uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE);
-            if (interactable && is_valid_address(interactable)) {
+            // فعال کردن دکمه (آفست 0xD8)
+            uintptr_t interactableAddr = (uintptr_t)btn + OFFSET_BUTTON_INTERACTABLE;
+            if (is_valid_address((void*)interactableAddr)) {
+                bool* interactable = (bool*)interactableAddr;
                 *interactable = true;
                 write_log(g_clickLog, "✅ Button enabled");
+            } else {
+                write_log(g_clickLog, "⚠️ Could not enable button");
             }
             
-            // گرفتن onClick
-            void* onClick = *(void**)((uintptr_t)btn + OFFSET_BUTTON_ONCLICK);
+            // گرفتن onClick (آفست 0x100)
+            uintptr_t onClickAddr = (uintptr_t)btn + OFFSET_BUTTON_ONCLICK;
+            if (!is_valid_address((void*)onClickAddr)) {
+                write_log(g_clickLog, "❌ onClick address invalid!");
+                write_log(g_clickLog, "========== DONE ==========\n");
+                return;
+            }
+            
+            void* onClick = *(void**)onClickAddr;
             if (!onClick || !is_valid_address(onClick)) {
                 write_log(g_clickLog, "❌ onClick is null or invalid!");
                 write_log(g_clickLog, "========== DONE ==========\n");
@@ -272,7 +336,7 @@ static void ClickConnectButton() {
             }
             write_log(g_clickLog, "✅ onClick: 0x" + std::to_string((uintptr_t)onClick));
             
-            // صدا زدن Invoke
+            // صدا زدن UnityAction.Invoke (آفست 0x1E8482C)
             typedef void (*invoke_t)(void*);
             invoke_t Invoke = (invoke_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E8482C"));
             if (!Invoke) {
@@ -290,10 +354,8 @@ static void ClickConnectButton() {
         
         write_log(g_clickLog, "❌ CONNECT button not found!");
         
-    } catch (const std::exception& e) {
-        write_log(g_clickLog, "❌ Exception: " + std::string(e.what()));
     } catch (...) {
-        write_log(g_clickLog, "❌ Unknown exception!");
+        write_log(g_clickLog, "❌ Exception occurred!");
     }
     
     write_log(g_clickLog, "========== DONE ==========\n");
@@ -303,7 +365,7 @@ static void ClickConnectButton() {
 void (*orig_UnityAction_Invoke)(void* action);
 void hook_UnityAction_Invoke(void* action) {
     if (!g_gameReady) {
-        write_log(g_clickLog, "⚡ UnityAction called but game not ready!");
+        write_log(g_clickLog, "⚡ UnityAction called but game not ready");
         return;
     }
     write_log(g_clickLog, "⚡ UnityAction.Invoke() called!");
@@ -321,7 +383,7 @@ void hook_GtaMenuStart(void *instance) {
         g_gtaInstance = instance;
         if (!g_gameReady) {
             g_gameReady = true;
-            write_log(g_buttonsLog, "✅ Game ready! (GtaMenuControl.Start hooked)");
+            write_log(g_buttonsLog, "✅ Game ready! (Start hooked)");
             write_debug("✅ Game ready!");
         }
     }
@@ -335,7 +397,6 @@ static void install_hooks_with_delay() {
     write_log(g_buttonsLog, "⏳ Waiting for game to load...");
     write_debug("⏳ Waiting for game to load...");
     
-    // مرحله 1: صبر کن تا libil2cpp.so لود بشه
     int waitCount = 0;
     while (!isLibraryLoaded(targetLibName) && waitCount < MAX_WAIT) {
         sleep(1);
@@ -350,7 +411,7 @@ static void install_hooks_with_delay() {
     write_log(g_buttonsLog, "✅ libil2cpp.so loaded");
     write_debug("✅ libil2cpp.so loaded");
     
-    // مرحله 2: صبر کن تا GtaMenuControl instance ساخته بشه
+    // تلاش برای گرفتن instance
     waitCount = 0;
     while (waitCount < MAX_WAIT) {
         void* instance = get_gta_instance_safe();
@@ -366,12 +427,11 @@ static void install_hooks_with_delay() {
     }
     
     if (!g_gameReady) {
-        write_log(g_buttonsLog, "⚠️ GtaMenuControl not ready, will try hook on Start");
+        write_log(g_buttonsLog, "⚠️ No instance yet, will use hook");
     }
     
-    // مرحله 3: نصب هوک‌ها
+    // نصب هوک‌ها
 #if defined(__aarch64__)
-    // هوک UnityAction.Invoke
     void* invokeAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1E8482C"));
     if (invokeAddr && is_valid_address(invokeAddr)) {
         int res = DobbyHook(invokeAddr, (dobby_dummy_func_t)hook_UnityAction_Invoke, (dobby_dummy_func_t*)&orig_UnityAction_Invoke);
@@ -387,7 +447,6 @@ static void install_hooks_with_delay() {
         write_debug("❌ UnityAction.Invoke() address not found");
     }
     
-    // هوک GtaMenuControl.Start
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr && is_valid_address(startAddr)) {
         int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
@@ -404,31 +463,15 @@ static void install_hooks_with_delay() {
     }
 #endif
     
-    // مرحله 4: اگه هنوز instance نداریم، یه بار دیگه امتحان کن
-    if (!g_gameReady) {
-        write_log(g_buttonsLog, "⏳ Waiting additional 5 seconds for instance...");
-        for (int i = 0; i < 5; i++) {
-            void* instance = get_gta_instance_safe();
-            if (instance && is_valid_address(instance)) {
-                g_gtaInstance = instance;
-                g_gameReady = true;
-                write_log(g_buttonsLog, "✅ GtaMenuControl instance ready!");
-                write_debug("✅ GtaMenuControl instance ready!");
-                break;
-            }
-            sleep(1);
-        }
-    }
+    g_hooksInstalled = true;
     
     if (g_gameReady) {
         write_log(g_buttonsLog, "✅ Mod ready! All hooks installed.");
         write_debug("✅ Mod ready!");
     } else {
-        write_log(g_buttonsLog, "⚠️ Mod loaded but game not ready. Hooks installed for when game starts.");
-        write_debug("⚠️ Mod loaded but game not ready");
+        write_log(g_buttonsLog, "✅ Mod loaded, waiting for game to start...");
+        write_debug("✅ Mod loaded, waiting for game to start...");
     }
-    
-    g_hooksInstalled = true;
 }
 
 // ======================== منو ========================
@@ -451,7 +494,6 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     return ret;
 }
 
-// ======================== تغییرات منو ========================
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
              jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
     
@@ -475,17 +517,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    // صبر کن تا بازی کامل لود بشه
     install_hooks_with_delay();
-    
-    // اگر هنوز بازی آماده نیست، هوک‌ها نصب شدن و وقتی Start صدا زده شد، کار میکنن
     write_log(g_buttonsLog, "✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
 __attribute__((constructor))
 void lib_main() {
-    // ایجاد پوشه و نصب کرش‌گیر
     mkdir(g_basePath.c_str(), 0777);
     install_crash_handler();
     
@@ -493,6 +531,5 @@ void lib_main() {
     write_log(g_buttonsLog, "⏳ Starting initialization...");
     write_debug("🚀 lib_main called");
     
-    // اجرای ترد اصلی
     std::thread(hack_thread).detach();
 }
