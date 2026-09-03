@@ -24,18 +24,17 @@
 // ======================== آفست‌های تأیید شده (همه از دامپ) ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
-#define OFFSET_MENU_BUTTONS             0x30          // GtaMenuControl.menuButtons
-#define OFFSET_BUTTON_ONCLICK           0x100         // Button.m_OnClick
-#define OFFSET_BUTTON_INTERACTABLE      0xD8          // Selectable.m_Interactable
-#define OFFSET_OBJECT_GET_NAME          0x1E7CE6C     // UnityEngine.Object.get_name()
-#define OFFSET_IL2CPP_STRING_NEW        0xE40BF0      // il2cpp_string_new()
-#define OFFSET_GAMEOBJECT_NAME          0x20          // GameObject.m_Name (String)
-#define OFFSET_ONPOINTERCLICK           0x1F04A60     // UnityEngine.UI.Button.OnPointerClick
+#define OFFSET_MENU_BUTTONS             0x30
+#define OFFSET_BUTTON_ONCLICK           0x100
+#define OFFSET_BUTTON_INTERACTABLE      0xD8
+#define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
+#define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
+#define OFFSET_GAMEOBJECT_NAME          0x20
+#define OFFSET_ONPOINTERCLICK           0x1F04A60
 
 #define MAX_BUTTONS 30
 #define MAX_WAIT 30
 
-// ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_buttonsLog = g_basePath + "buttons_list.txt";
 static std::string g_clickLog = g_basePath + "click_log.txt";
@@ -178,30 +177,18 @@ static std::string get_button_name_safe(void* btn) {
     return "";
 }
 
-// ======================== پیدا کردن همه Button‌ها با JNI (بدون آفست) ========================
-static void FindAllButtonsWithJNI() {
+// ======================== پیدا کردن همه Button‌ها با JNI (با `env` دریافتی) ========================
+static void FindAllButtonsWithJNI(JNIEnv* env) {
     write_log(g_buttonsLog, "\n========== FIND ALL BUTTONS WITH JNI ==========");
     write_log(g_buttonsLog, "Time: " + get_time());
     
-    JNIEnv* env = nullptr;
-    JavaVM* vm = nullptr;
-    jsize count;
-    
-    // گرفتن JavaVM
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &count) != JNI_OK || count == 0) {
-        write_log(g_buttonsLog, "❌ Failed to get JavaVM");
-        write_log(g_buttonsLog, "========== DONE ==========\n");
-        return;
-    }
-    vm->GetEnv((void**)&env, JNI_VERSION_1_6);
     if (!env) {
-        write_log(g_buttonsLog, "❌ Failed to get JNIEnv");
+        write_log(g_buttonsLog, "❌ JNIEnv is null!");
         write_log(g_buttonsLog, "========== DONE ==========\n");
         return;
     }
     
     try {
-        // 1. گرفتن کلاس UnityEngine.UI.Button
         jclass buttonClass = env->FindClass("UnityEngine.UI.Button");
         if (!buttonClass) {
             env->ExceptionClear();
@@ -211,7 +198,6 @@ static void FindAllButtonsWithJNI() {
         }
         write_log(g_buttonsLog, "✅ UnityEngine.UI.Button class found");
         
-        // 2. گرفتن کلاس UnityEngine.Resources
         jclass resourcesClass = env->FindClass("UnityEngine.Resources");
         if (!resourcesClass) {
             env->ExceptionClear();
@@ -221,7 +207,6 @@ static void FindAllButtonsWithJNI() {
         }
         write_log(g_buttonsLog, "✅ UnityEngine.Resources class found");
         
-        // 3. گرفتن متد FindObjectsOfTypeAll
         jmethodID findObjectsMethod = env->GetStaticMethodID(
             resourcesClass,
             "FindObjectsOfTypeAll",
@@ -235,7 +220,6 @@ static void FindAllButtonsWithJNI() {
         }
         write_log(g_buttonsLog, "✅ FindObjectsOfTypeAll method found");
         
-        // 4. صدا زدن FindObjectsOfTypeAll
         jobjectArray buttonsArray = (jobjectArray)env->CallStaticObjectMethod(
             resourcesClass,
             findObjectsMethod,
@@ -249,17 +233,14 @@ static void FindAllButtonsWithJNI() {
         }
         write_log(g_buttonsLog, "✅ FindObjectsOfTypeAll called successfully");
         
-        // 5. تعداد دکمه‌ها
         jsize buttonCount = env->GetArrayLength(buttonsArray);
         write_log(g_buttonsLog, "📊 Total buttons found: " + std::to_string(buttonCount));
         
-        // 6. حلقه زدن روی دکمه‌ها
         int found = 0;
         for (int i = 0; i < buttonCount && i < 100; i++) {
             jobject btnObj = env->GetObjectArrayElement(buttonsArray, i);
             if (!btnObj) continue;
             
-            // گرفتن اسم دکمه با JNI
             jclass btnClass = env->GetObjectClass(btnObj);
             jmethodID getNameMethod = env->GetMethodID(btnClass, "get_name", "()Ljava/lang/String;");
             if (!getNameMethod) {
@@ -307,23 +288,13 @@ static void FindAllButtonsWithJNI() {
     write_log(g_buttonsLog, "========== DONE ==========\n");
 }
 
-// ======================== کلیک روی CONNECT با JNI ========================
-static void ClickConnectWithJNI() {
+// ======================== کلیک روی CONNECT با JNI (با `env` دریافتی) ========================
+static void ClickConnectWithJNI(JNIEnv* env) {
     write_log(g_clickLog, "\n========== CLICK CONNECT WITH JNI ==========");
     write_log(g_clickLog, "Time: " + get_time());
     
-    JNIEnv* env = nullptr;
-    JavaVM* vm = nullptr;
-    jsize count;
-    
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &count) != JNI_OK || count == 0) {
-        write_log(g_clickLog, "❌ Failed to get JavaVM");
-        write_log(g_clickLog, "========== DONE ==========\n");
-        return;
-    }
-    vm->GetEnv((void**)&env, JNI_VERSION_1_6);
     if (!env) {
-        write_log(g_clickLog, "❌ Failed to get JNIEnv");
+        write_log(g_clickLog, "❌ JNIEnv is null!");
         write_log(g_clickLog, "========== DONE ==========\n");
         return;
     }
@@ -389,7 +360,6 @@ static void ClickConnectWithJNI() {
                     write_log(g_clickLog, "✅ Found CONNECT button!");
                     write_log(g_clickLog, "   JNI Object: 0x" + std::to_string((uintptr_t)btnObj));
                     
-                    // کلیک با JNI: صدا زدن onClick
                     jfieldID onClickField = env->GetFieldID(btnClass, "m_OnClick", "LUnityEngine/UI/Button$ButtonClickedEvent;");
                     if (onClickField) {
                         jobject onClickObj = env->GetObjectField(btnObj, onClickField);
@@ -532,11 +502,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
     switch (featNum) {
         case 0:
             write_log(g_buttonsLog, "🔘 Find All Buttons (JNI) pressed");
-            FindAllButtonsWithJNI();
+            FindAllButtonsWithJNI(env);
             break;
         case 1:
             write_log(g_buttonsLog, "🔘 Click CONNECT (JNI) pressed");
-            ClickConnectWithJNI();
+            ClickConnectWithJNI(env);
             break;
         case 2:
             write_log(g_buttonsLog, "📊 Status");
