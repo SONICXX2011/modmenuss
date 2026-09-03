@@ -39,6 +39,7 @@ static bool g_gameReady = false;
 static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_captureEnabled = false;
+static JNIEnv* g_env = nullptr;  // ← JNIEnv ذخیره شده از Changes
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -62,21 +63,14 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast ========================
+// ======================== Toast با JNIEnv ذخیره شده ========================
 static void show_toast(const std::string& msg) {
-    JNIEnv* env = nullptr;
-    JavaVM* vm = nullptr;
-    jsize count;
+    if (!g_env) {
+        write_debug("❌ JNIEnv not available for Toast");
+        return;
+    }
     
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &count) != JNI_OK || count == 0) {
-        write_debug("❌ Failed to get JavaVM for Toast");
-        return;
-    }
-    vm->GetEnv((void**)&env, JNI_VERSION_1_6);
-    if (!env) {
-        write_debug("❌ Failed to get JNIEnv for Toast");
-        return;
-    }
+    JNIEnv* env = g_env;
     
     jclass toastClass = env->FindClass("android/widget/Toast");
     if (!toastClass) {
@@ -92,6 +86,7 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
+    // گرفتن Application Context
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
@@ -386,6 +381,9 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
              jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
+    
+    // ذخیره JNIEnv برای استفاده در Toast
+    g_env = env;
     
     if (featNum == 0) {
         g_captureEnabled = boolean;
