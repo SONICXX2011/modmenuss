@@ -18,7 +18,7 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها (همه از دامپ تأیید شده) ========================
+// ======================== آفست‌های دقیق ========================
 #define OFFSET_GTA_GET_INSTANCE     0xF570C4      // GtaMenuControl.get_Instance()
 #define OFFSET_GTA_START            0xF571A4      // GtaMenuControl.Start()
 #define OFFSET_IP_INPUT             0xC0          // GtaMenuControl.ipInput
@@ -27,10 +27,9 @@
 #define OFFSET_NETWORK_ADDR         0x50          // NetworkManager.networkAddress
 #define OFFSET_NETWORK_TRANSPORT    0x48          // NetworkManager.transport
 #define OFFSET_KCP_PORT             0x88          // KcpTransport.port
-#define OFFSET_MAX_CONNECTIONS      0x58          // NetworkManager.maxConnections
 #define OFFSET_IL2CPP_STRING_NEW    0xE40BF0      // il2cpp_string_new()
 
-// ======================== IP پیش‌فرض ========================
+// ======================== IP و پورت پیش‌فرض ========================
 #define DEFAULT_IP "5.57.37.224"
 #define DEFAULT_PORT 9876
 
@@ -177,40 +176,6 @@ static void* create_mono_string(const char* str) {
     return il2cpp_string_new(str);
 }
 
-static std::string mono_string_to_utf8(void* monoString) {
-    if (monoString == nullptr) return "";
-    if (!is_valid_address(monoString)) return "";
-    
-    typedef int32_t (*il2cpp_string_length_t)(void* str);
-    il2cpp_string_length_t il2cpp_string_length = 
-        (il2cpp_string_length_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("il2cpp_string_length"));
-    if (il2cpp_string_length == nullptr) {
-        write_connect_log("❌ il2cpp_string_length not found");
-        return "";
-    }
-    
-    int length = il2cpp_string_length(monoString);
-    if (length <= 0 || length > 65536) return "";
-    
-    typedef uint16_t* (*il2cpp_string_chars_t)(void* str);
-    il2cpp_string_chars_t il2cpp_string_chars = 
-        (il2cpp_string_chars_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("il2cpp_string_chars"));
-    if (il2cpp_string_chars == nullptr) {
-        write_connect_log("❌ il2cpp_string_chars not found");
-        return "";
-    }
-    
-    uint16_t* chars = il2cpp_string_chars(monoString);
-    if (chars == nullptr || !is_valid_address(chars)) return "";
-    
-    std::string result;
-    result.reserve(length);
-    for (int i = 0; i < length; i++) {
-        result += (char)(chars[i] & 0xFF);
-    }
-    return result;
-}
-
 // ======================== گرفتن GtaMenuControl instance ========================
 static void* get_gta_instance() {
     if (g_gtaInstance != nullptr && is_valid_address(g_gtaInstance)) {
@@ -234,37 +199,6 @@ static void* get_gta_instance() {
     return nullptr;
 }
 
-// ======================== تزریق IP به ipInput (UI) ========================
-static bool inject_ip_to_input(const std::string& ip) {
-    void* instance = get_gta_instance();
-    if (instance == nullptr) {
-        write_report("❌ Cannot get instance for IP injection");
-        return false;
-    }
-    
-    void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
-    if (ipInput == nullptr || !is_valid_address(ipInput)) {
-        write_report("❌ ipInput is null");
-        return false;
-    }
-    
-    void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
-    if (mTextPtr == nullptr || !is_valid_pointer(mTextPtr)) {
-        write_report("❌ m_Text pointer invalid");
-        return false;
-    }
-    
-    void* monoString = create_mono_string(ip.c_str());
-    if (monoString == nullptr) {
-        write_report("❌ Failed to create mono string");
-        return false;
-    }
-    
-    *mTextPtr = monoString;
-    write_report("✅ IP injected to UI: " + ip);
-    return true;
-}
-
 // ======================== گرفتن NetworkManager ========================
 static void* get_network_manager() {
     void* instance = get_gta_instance();
@@ -272,84 +206,107 @@ static void* get_network_manager() {
         write_connect_log("❌ Cannot get GtaMenuControl instance");
         return nullptr;
     }
-    
     void* nm = *(void**)((uintptr_t)instance + OFFSET_NETWORK_MANAGER);
     if (nm == nullptr || !is_valid_address(nm)) {
         write_connect_log("❌ NetworkManager is null or invalid");
         return nullptr;
     }
+    write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nm));
     return nm;
 }
 
-// ======================== تنظیم IP و پورت ========================
-static bool SetIPAndPort(const std::string& ip, uint16_t port) {
+// ======================== گرفتن Transport ========================
+static void* get_transport() {
+    void* nm = get_network_manager();
+    if (nm == nullptr) return nullptr;
+    void* transport = *(void**)((uintptr_t)nm + OFFSET_NETWORK_TRANSPORT);
+    if (transport == nullptr || !is_valid_address(transport)) {
+        write_connect_log("❌ Transport is null or invalid");
+        return nullptr;
+    }
+    write_connect_log("✅ Transport: 0x" + std::to_string((uintptr_t)transport));
+    return transport;
+}
+
+// ======================== ====== تابع اصلی: تنظیم IP و Port ====== ========================
+static void SetIPAndPort(const std::string& ip, uint16_t port) {
     write_connect_log("\n========== SET IP & PORT ==========");
     write_connect_log("Time: " + get_time());
     write_report("🔘 Set IP & Port pressed");
     write_result("🔘 Set IP & Port");
     
     try {
+        // 1. گرفتن NetworkManager
         void* nm = get_network_manager();
         if (nm == nullptr) {
             write_connect_log("❌ NetworkManager not found");
             write_result("❌ Failed: NetworkManager not found");
-            return false;
+            return;
         }
-        write_connect_log("✅ NetworkManager: 0x" + std::to_string((uintptr_t)nm));
         
-        // 1. تنظیم networkAddress (آفست 0x50)
+        // ====== 2. تنظیم networkAddress (آفست 0x50) ======
         void** addrPtr = (void**)((uintptr_t)nm + OFFSET_NETWORK_ADDR);
         if (!is_valid_pointer(addrPtr)) {
             write_connect_log("❌ networkAddress pointer invalid");
             write_result("❌ Failed: invalid address");
-            return false;
+            return;
         }
         void* monoStr = create_mono_string(ip.c_str());
         if (monoStr == nullptr) {
             write_connect_log("❌ Failed to create mono string");
             write_result("❌ Failed: mono string");
-            return false;
+            return;
         }
         *addrPtr = monoStr;
         write_connect_log("✅ networkAddress set to: " + ip);
         
-        // 2. گرفتن transport (آفست 0x48)
-        void* transport = *(void**)((uintptr_t)nm + OFFSET_NETWORK_TRANSPORT);
-        if (transport == nullptr || !is_valid_address(transport)) {
+        // ====== 3. گرفتن transport (آفست 0x48) ======
+        void* transport = get_transport();
+        if (transport == nullptr) {
             write_connect_log("❌ Transport not found");
             write_result("❌ Failed: Transport not found");
-            return false;
+            return;
         }
-        write_connect_log("✅ Transport: 0x" + std::to_string((uintptr_t)transport));
         
-        // 3. تنظیم port (آفست 0x88)
+        // ====== 4. تنظیم port (آفست 0x88) ======
         uint16_t* portPtr = (uint16_t*)((uintptr_t)transport + OFFSET_KCP_PORT);
         if (!is_valid_address((void*)portPtr)) {
             write_connect_log("❌ Port pointer invalid");
             write_result("❌ Failed: Port invalid");
-            return false;
+            return;
         }
         *portPtr = port;
         write_connect_log("✅ Port set to: " + std::to_string(port));
         
-        // 4. تزریق IP به UI (برای نمایش)
-        inject_ip_to_input(ip);
+        // ====== 5. تزریق IP به UI (فقط برای نمایش) ======
+        void* instance = get_gta_instance();
+        if (instance) {
+            void* ipInput = *(void**)((uintptr_t)instance + OFFSET_IP_INPUT);
+            if (ipInput && is_valid_address(ipInput)) {
+                void** mTextPtr = (void**)((uintptr_t)ipInput + OFFSET_INPUTFIELD_M_TEXT);
+                if (mTextPtr && is_valid_pointer(mTextPtr)) {
+                    std::string ipPort = ip + ":" + std::to_string(port);
+                    void* monoIpPort = create_mono_string(ipPort.c_str());
+                    if (monoIpPort) {
+                        *mTextPtr = monoIpPort;
+                        write_connect_log("✅ IP injected to UI: " + ipPort);
+                    }
+                }
+            }
+        }
         
         write_connect_log("✅ IP and Port set successfully!");
         write_result("✅ Set IP: " + ip + " | Port: " + std::to_string(port));
         write_connect_log("========== DONE ==========\n");
-        return true;
         
     } catch (const std::exception& e) {
         write_connect_log("❌ Exception: " + std::string(e.what()));
         write_crash("⚠️ Exception: " + std::string(e.what()));
         write_result("❌ Crashed");
-        return false;
     } catch (...) {
         write_connect_log("❌ Unknown exception!");
         write_crash("⚠️ Unknown exception!");
         write_result("❌ Crashed");
-        return false;
     }
 }
 
@@ -364,8 +321,11 @@ void hook_GtaMenuStart(void *instance) {
         
         std::string ip = load_ip();
         if (!ip.empty()) {
-            inject_ip_to_input(ip);
-            write_report("📌 Auto-injected saved IP to UI");
+            size_t colon = ip.find(':');
+            std::string ipPart = (colon != std::string::npos) ? ip.substr(0, colon) : ip;
+            int port = (colon != std::string::npos) ? std::stoi(ip.substr(colon + 1)) : DEFAULT_PORT;
+            write_connect_log("📌 Auto-setting IP: " + ipPart + " Port: " + std::to_string(port));
+            SetIPAndPort(ipPart, (uint16_t)port);
         }
     }
     if (orig_GtaMenuStart) {
@@ -379,9 +339,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         OBFUSCATE("Category_🌐 Network"),
         OBFUSCATE("InputText_Enter IP:Port"),
-        OBFUSCATE("Button_💉 Inject IP to UI"),
+        OBFUSCATE("Button_Set IP & Port"),
         OBFUSCATE("Button_📋 Show Current IP"),
-        OBFUSCATE("Button_Set IP & Port (NO Connect)"),
         OBFUSCATE("RichTextView_📁 /sdcard/Download/lac/"),
         OBFUSCATE("RichTextView_📌 Check connect_log.txt"),
     };
@@ -423,19 +382,19 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
                 break;
             }
             
-            case 1: { // Inject IP to UI
-                write_report("🔘 Inject IP pressed");
+            case 1: { // Set IP & Port
+                write_report("🔘 Set IP & Port pressed");
                 if (g_targetIP.empty()) {
                     g_targetIP = load_ip();
                     if (g_targetIP.empty()) {
                         g_targetIP = std::string(DEFAULT_IP) + ":" + std::to_string(DEFAULT_PORT);
+                        save_ip(g_targetIP);
                     }
                 }
-                if (inject_ip_to_input(g_targetIP)) {
-                    write_result("✅ IP injected: " + g_targetIP);
-                } else {
-                    write_result("❌ IP injection failed");
-                }
+                size_t colon = g_targetIP.find(':');
+                std::string ip = (colon != std::string::npos) ? g_targetIP.substr(0, colon) : g_targetIP;
+                int port = (colon != std::string::npos) ? std::stoi(g_targetIP.substr(colon + 1)) : DEFAULT_PORT;
+                SetIPAndPort(ip, (uint16_t)port);
                 break;
             }
             
@@ -448,21 +407,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featN
                     write_report("❌ No saved IP!");
                     write_result("❌ No saved IP!");
                 }
-                break;
-            }
-            
-            case 3: { // Set IP & Port
-                if (g_targetIP.empty()) {
-                    g_targetIP = load_ip();
-                    if (g_targetIP.empty()) {
-                        g_targetIP = std::string(DEFAULT_IP) + ":" + std::to_string(DEFAULT_PORT);
-                        save_ip(g_targetIP);
-                    }
-                }
-                size_t colon = g_targetIP.find(':');
-                std::string ip = (colon != std::string::npos) ? g_targetIP.substr(0, colon) : g_targetIP;
-                int port = (colon != std::string::npos) ? std::stoi(g_targetIP.substr(colon + 1)) : DEFAULT_PORT;
-                SetIPAndPort(ip, (uint16_t)port);
                 break;
             }
             
@@ -533,7 +477,6 @@ void hack_thread() {
     void* instance = get_gta_instance();
     if (instance != nullptr) {
         write_report("✅ Got instance via get_Instance");
-        inject_ip_to_input(g_targetIP);
     } else {
         write_report("⚠️ get_Instance returned null, waiting for hook...");
         for (int i = 0; i < 15 && g_gtaInstance == nullptr; i++) {
@@ -541,17 +484,17 @@ void hack_thread() {
         }
         if (g_gtaInstance != nullptr) {
             write_report("✅ Got instance via hook");
-            inject_ip_to_input(g_targetIP);
         } else {
             write_report("❌ Failed to get instance!");
         }
     }
 
-    // ====== تنظیم خودکار IP و پورت ======
+    // ====== تنظیم خودکار IP و Port ======
     if (g_gtaInstance != nullptr) {
         size_t colon = g_targetIP.find(':');
         std::string ip = (colon != std::string::npos) ? g_targetIP.substr(0, colon) : g_targetIP;
         int port = (colon != std::string::npos) ? std::stoi(g_targetIP.substr(colon + 1)) : DEFAULT_PORT;
+        write_connect_log("📌 Auto-setting IP: " + ip + " Port: " + std::to_string(port));
         SetIPAndPort(ip, (uint16_t)port);
     }
 
