@@ -21,13 +21,18 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌های نهایی ========================
+// ======================== آفست‌های جدید از Dump5 ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_EXECUTE_ISELECT          0x208A184   // ✅ ExecuteEvents.Execute<ISelectHandler>
+
+// ====== آفست‌های هوک ======
+#define OFFSET_ONPOINTERCLICK           0x1F14A4C   // OnPointerClick
+#define OFFSET_EXECUTE_POINTER_CLICK    0x2098B60   // Execute<IPointerClickHandler>
+#define OFFSET_EXECUTE_ISELECT          0x20994B0   // Execute<ISelectHandler>
+#define OFFSET_UNITYEVENT_INVOKE        0x1E94354   // UnityEvent.Invoke
 
 #define MAX_WAIT 30
 
@@ -42,12 +47,22 @@ static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
 static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
-static bool g_captureEnabled = false;
 static JNIEnv* g_env = nullptr;
+
+// ====== وضعیت روش‌ها ======
+static bool g_method_onpointer = false;
+static bool g_method_execute_click = false;
+static bool g_method_execute_select = false;
+static bool g_method_unityevent = false;
+
+// ====== شمارنده کلیک ======
 static int g_clickCounter = 0;
 
-// ======================== پوینتر تابع اصلی ========================
+// ====== پوینترهای توابع اصلی ======
+void (*orig_OnPointerClick)(void* button, void* eventData);
+void (*orig_ExecutePointerClick)(void* handler, void* eventData);
 void (*orig_ExecuteISelect)(void* handler, void* eventData);
+void (*orig_UnityEvent_Invoke)(void* unityEvent);
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -71,7 +86,7 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast با JNIEnv ذخیره شده ========================
+// ======================== Toast ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("⚠️ JNIEnv not available for Toast");
@@ -94,7 +109,6 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
-    // گرفتن Application Context از ActivityThread
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
@@ -154,7 +168,6 @@ static void show_toast(const std::string& msg) {
     }
     
     env->CallVoidMethod(toast, showMethod);
-    
     env->DeleteLocalRef(toast);
     env->DeleteLocalRef(context);
     env->DeleteLocalRef(activityThread);
@@ -274,28 +287,70 @@ static std::string get_button_name_safe(void* obj) {
     return "";
 }
 
-// ======================== هوک Execute<ISelectHandler> ========================
-void hook_ExecuteISelect(void* handler, void* eventData) {
-    if (g_captureEnabled && g_gameReady && handler && is_valid_address(handler)) {
+// ======================== هوک‌ها ========================
+
+// ----- روش 1: OnPointerClick -----
+void hook_OnPointerClick(void* button, void* eventData) {
+    if (g_method_onpointer && g_gameReady && button && is_valid_address(button)) {
         g_clickCounter++;
-        
+        std::string name = get_button_name_safe(button);
+        if (!name.empty()) {
+            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] " + name);
+            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | " + name);
+            write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
+        } else {
+            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] Unknown");
+            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | Unknown");
+            write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
+        }
+    }
+    if (orig_OnPointerClick) orig_OnPointerClick(button, eventData);
+}
+
+// ----- روش 2: Execute<IPointerClickHandler> -----
+void hook_ExecutePointerClick(void* handler, void* eventData) {
+    if (g_method_execute_click && g_gameReady && handler && is_valid_address(handler)) {
+        g_clickCounter++;
         std::string name = get_button_name_safe(handler);
         if (!name.empty()) {
-            std::string msg = "🟣 [" + std::to_string(g_clickCounter) + "] " + name;
-            show_toast(msg);
-            write_log(g_clickLog, "[Execute-ISelect] #" + std::to_string(g_clickCounter) + " | " + name);
+            show_toast("🟢 [" + std::to_string(g_clickCounter) + "] " + name);
+            write_log(g_clickLog, "[Execute-Click] #" + std::to_string(g_clickCounter) + " | " + name);
             write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
         } else {
-            std::string msg = "🟣 [" + std::to_string(g_clickCounter) + "] Unknown";
-            show_toast(msg);
-            write_log(g_clickLog, "[Execute-ISelect] #" + std::to_string(g_clickCounter) + " | Unknown");
+            show_toast("🟢 [" + std::to_string(g_clickCounter) + "] Unknown");
+            write_log(g_clickLog, "[Execute-Click] #" + std::to_string(g_clickCounter) + " | Unknown");
             write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
         }
     }
-    
-    if (orig_ExecuteISelect) {
-        orig_ExecuteISelect(handler, eventData);
+    if (orig_ExecutePointerClick) orig_ExecutePointerClick(handler, eventData);
+}
+
+// ----- روش 3: Execute<ISelectHandler> -----
+void hook_ExecuteISelect(void* handler, void* eventData) {
+    if (g_method_execute_select && g_gameReady && handler && is_valid_address(handler)) {
+        g_clickCounter++;
+        std::string name = get_button_name_safe(handler);
+        if (!name.empty()) {
+            show_toast("🟣 [" + std::to_string(g_clickCounter) + "] " + name);
+            write_log(g_clickLog, "[Execute-Select] #" + std::to_string(g_clickCounter) + " | " + name);
+            write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
+        } else {
+            show_toast("🟣 [" + std::to_string(g_clickCounter) + "] Unknown");
+            write_log(g_clickLog, "[Execute-Select] #" + std::to_string(g_clickCounter) + " | Unknown");
+            write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
+        }
     }
+    if (orig_ExecuteISelect) orig_ExecuteISelect(handler, eventData);
+}
+
+// ----- روش 4: UnityEvent.Invoke -----
+void hook_UnityEvent_Invoke(void* unityEvent) {
+    if (g_method_unityevent && g_gameReady && unityEvent && is_valid_address(unityEvent)) {
+        g_clickCounter++;
+        write_log(g_clickLog, "[UnityEvent.Invoke] #" + std::to_string(g_clickCounter) + " | Event: 0x" + std::to_string((uintptr_t)unityEvent));
+        show_toast("🟠 [" + std::to_string(g_clickCounter) + "] Event");
+    }
+    if (orig_UnityEvent_Invoke) orig_UnityEvent_Invoke(unityEvent);
 }
 
 // ======================== هوک GtaMenuControl.Start ========================
@@ -308,9 +363,7 @@ void hook_GtaMenuStart(void *instance) {
             write_debug("✅ Game ready!");
         }
     }
-    if (orig_GtaMenuStart) {
-        orig_GtaMenuStart(instance);
-    }
+    if (orig_GtaMenuStart) orig_GtaMenuStart(instance);
 }
 
 // ======================== نصب هوک‌ها ========================
@@ -347,30 +400,42 @@ static void install_hooks_with_delay() {
     }
     
 #if defined(__aarch64__)
-    // هوک Execute<ISelectHandler> (آفست 0x208A184)
-    void* executeAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x208A184"));
-    if (executeAddr && is_valid_address(executeAddr)) {
-        int res = DobbyHook(executeAddr, (dobby_dummy_func_t)hook_ExecuteISelect, (dobby_dummy_func_t*)&orig_ExecuteISelect);
-        if (res == 0) {
-            write_debug("✅ Execute<ISelectHandler> hooked");
-        } else {
-            write_debug("❌ Execute<ISelectHandler> hook failed: " + std::to_string(res));
+    // روش 1: OnPointerClick (0x1F14A4C)
+    void* addr1 = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F14A4C"));
+    if (addr1 && is_valid_address(addr1)) {
+        if (DobbyHook(addr1, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick) == 0) {
+            write_debug("✅ OnPointerClick hooked (0x1F14A4C)");
         }
-    } else {
-        write_debug("❌ Execute<ISelectHandler> address not found");
+    }
+    
+    // روش 2: Execute<IPointerClickHandler> (0x2098B60)
+    void* addr2 = getAbsoluteAddress(targetLibName, OBFUSCATE("0x2098B60"));
+    if (addr2 && is_valid_address(addr2)) {
+        if (DobbyHook(addr2, (dobby_dummy_func_t)hook_ExecutePointerClick, (dobby_dummy_func_t*)&orig_ExecutePointerClick) == 0) {
+            write_debug("✅ Execute<IPointerClickHandler> hooked (0x2098B60)");
+        }
+    }
+    
+    // روش 3: Execute<ISelectHandler> (0x20994B0)
+    void* addr3 = getAbsoluteAddress(targetLibName, OBFUSCATE("0x20994B0"));
+    if (addr3 && is_valid_address(addr3)) {
+        if (DobbyHook(addr3, (dobby_dummy_func_t)hook_ExecuteISelect, (dobby_dummy_func_t*)&orig_ExecuteISelect) == 0) {
+            write_debug("✅ Execute<ISelectHandler> hooked (0x20994B0)");
+        }
+    }
+    
+    // روش 4: UnityEvent.Invoke (0x1E94354)
+    void* addr4 = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1E94354"));
+    if (addr4 && is_valid_address(addr4)) {
+        if (DobbyHook(addr4, (dobby_dummy_func_t)hook_UnityEvent_Invoke, (dobby_dummy_func_t*)&orig_UnityEvent_Invoke) == 0) {
+            write_debug("✅ UnityEvent.Invoke hooked (0x1E94354)");
+        }
     }
     
     // هوک GtaMenuControl.Start
     void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
     if (startAddr && is_valid_address(startAddr)) {
-        int res = DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
-        if (res == 0) {
-            write_debug("✅ GtaMenuControl.Start() hooked");
-        } else {
-            write_debug("❌ GtaMenuControl.Start() hook failed: " + std::to_string(res));
-        }
-    } else {
-        write_debug("❌ GtaMenuControl.Start() address not found");
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
     }
 #endif
     
@@ -380,14 +445,17 @@ static void install_hooks_with_delay() {
 
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    g_env = env;  // ذخیره JNIEnv برای Toast
+    g_env = env;
     
     const char *features[] = {
-        "Category_🎯 Capture (Select)",
-        "Toggle_Capture Mode (ISelectHandler)",
+        "Category_🎯 Capture Methods",
+        "Toggle_Method1: OnPointerClick",
+        "Toggle_Method2: Execute<IPointerClick>",
+        "Toggle_Method3: Execute<ISelect>",
+        "Toggle_Method4: UnityEvent.Invoke",
         "Button_📊 Reset Counter",
-        "RichTextView_📁 Logs: /sdcard/Download/lac/",
-        "RichTextView_📌 click_log.txt",
+        "Button_📁 Show Logs Path",
+        "RichTextView_📁 /sdcard/Download/lac/",
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = (jobjectArray)env->NewObjectArray(
@@ -402,26 +470,41 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
              jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
     
-    g_env = env;  // ذخیره JNIEnv برای Toast
+    g_env = env;
     
     switch (featNum) {
         case 0:
-            g_captureEnabled = boolean;
-            if (g_captureEnabled) {
-                g_clickCounter = 0;
-                show_toast("🔴 Capture ON (Select)");
-                write_debug("🔴 Capture mode enabled");
-                write_log(g_clickLog, "📌 Capture mode: ON (Counter reset)");
-            } else {
-                show_toast("⚫ Capture OFF");
-                write_debug("⚫ Capture mode disabled");
-                write_log(g_clickLog, "📌 Capture mode: OFF");
-            }
+            g_method_onpointer = boolean;
+            write_log(g_clickLog, "Method1 (OnPointerClick): " + std::string(boolean ? "ON ✅" : "OFF ❌"));
+            if (boolean) { g_clickCounter = 0; show_toast("🔵 Method1 ON"); }
+            else { show_toast("🔵 Method1 OFF"); }
             break;
         case 1:
+            g_method_execute_click = boolean;
+            write_log(g_clickLog, "Method2 (Execute<IPointerClick>): " + std::string(boolean ? "ON ✅" : "OFF ❌"));
+            if (boolean) { g_clickCounter = 0; show_toast("🟢 Method2 ON"); }
+            else { show_toast("🟢 Method2 OFF"); }
+            break;
+        case 2:
+            g_method_execute_select = boolean;
+            write_log(g_clickLog, "Method3 (Execute<ISelect>): " + std::string(boolean ? "ON ✅" : "OFF ❌"));
+            if (boolean) { g_clickCounter = 0; show_toast("🟣 Method3 ON"); }
+            else { show_toast("🟣 Method3 OFF"); }
+            break;
+        case 3:
+            g_method_unityevent = boolean;
+            write_log(g_clickLog, "Method4 (UnityEvent.Invoke): " + std::string(boolean ? "ON ✅" : "OFF ❌"));
+            if (boolean) { g_clickCounter = 0; show_toast("🟠 Method4 ON"); }
+            else { show_toast("🟠 Method4 OFF"); }
+            break;
+        case 4:
             g_clickCounter = 0;
+            write_log(g_clickLog, "📊 Counter reset to 0");
             show_toast("🔄 Counter reset: 0");
-            write_log(g_clickLog, "📌 Counter reset to 0");
+            break;
+        case 5:
+            show_toast("📁 /sdcard/Download/lac/");
+            write_log(g_clickLog, "📁 Logs path: " + g_basePath);
             break;
     }
 }
