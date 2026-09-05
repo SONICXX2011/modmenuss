@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <vector>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -25,7 +27,7 @@
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_EXECUTE_POINTER_CLICK    0x208A154   // ExecuteEvents.Execute<IPointerClickHandler>
+#define OFFSET_EXECUTE_ISELECT          0x208A184   // ✅ ExecuteEvents.Execute<ISelectHandler>
 
 #define MAX_WAIT 30
 
@@ -42,9 +44,10 @@ static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
 static bool g_captureEnabled = false;
 static JNIEnv* g_env = nullptr;
+static int g_clickCounter = 0;
 
 // ======================== پوینتر تابع اصلی ========================
-void (*orig_ExecutePointerClick)(void* handler, void* eventData);
+void (*orig_ExecuteISelect)(void* handler, void* eventData);
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -68,14 +71,15 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast ========================
+// ======================== Toast با JNIEnv ذخیره شده ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
-        write_debug("❌ JNIEnv not available for Toast");
+        write_debug("⚠️ JNIEnv not available for Toast");
         return;
     }
     
     JNIEnv* env = g_env;
+    
     jclass toastClass = env->FindClass("android/widget/Toast");
     if (!toastClass) {
         env->ExceptionClear();
@@ -90,6 +94,7 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
+    // گرفتن Application Context از ActivityThread
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
@@ -149,6 +154,7 @@ static void show_toast(const std::string& msg) {
     }
     
     env->CallVoidMethod(toast, showMethod);
+    
     env->DeleteLocalRef(toast);
     env->DeleteLocalRef(context);
     env->DeleteLocalRef(activityThread);
@@ -268,22 +274,27 @@ static std::string get_button_name_safe(void* obj) {
     return "";
 }
 
-// ======================== هوک ExecuteEvents.Execute ========================
-void hook_ExecutePointerClick(void* handler, void* eventData) {
+// ======================== هوک Execute<ISelectHandler> ========================
+void hook_ExecuteISelect(void* handler, void* eventData) {
     if (g_captureEnabled && g_gameReady && handler && is_valid_address(handler)) {
+        g_clickCounter++;
+        
         std::string name = get_button_name_safe(handler);
         if (!name.empty()) {
-            show_toast("🟣 " + name);
-            write_log(g_clickLog, "[ExecuteEvents] " + name);
+            std::string msg = "🟣 [" + std::to_string(g_clickCounter) + "] " + name;
+            show_toast(msg);
+            write_log(g_clickLog, "[Execute-ISelect] #" + std::to_string(g_clickCounter) + " | " + name);
             write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
         } else {
-            show_toast("🟣 Click");
-            write_log(g_clickLog, "[ExecuteEvents] Click (unknown) 0x" + std::to_string((uintptr_t)handler));
+            std::string msg = "🟣 [" + std::to_string(g_clickCounter) + "] Unknown";
+            show_toast(msg);
+            write_log(g_clickLog, "[Execute-ISelect] #" + std::to_string(g_clickCounter) + " | Unknown");
+            write_log(g_clickLog, "   Handler: 0x" + std::to_string((uintptr_t)handler));
         }
     }
     
-    if (orig_ExecutePointerClick) {
-        orig_ExecutePointerClick(handler, eventData);
+    if (orig_ExecuteISelect) {
+        orig_ExecuteISelect(handler, eventData);
     }
 }
 
@@ -336,17 +347,17 @@ static void install_hooks_with_delay() {
     }
     
 #if defined(__aarch64__)
-    // هوک ExecuteEvents.Execute<IPointerClickHandler> (آفست 0x208A154)
-    void* executeAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x208A154"));
+    // هوک Execute<ISelectHandler> (آفست 0x208A184)
+    void* executeAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x208A184"));
     if (executeAddr && is_valid_address(executeAddr)) {
-        int res = DobbyHook(executeAddr, (dobby_dummy_func_t)hook_ExecutePointerClick, (dobby_dummy_func_t*)&orig_ExecutePointerClick);
+        int res = DobbyHook(executeAddr, (dobby_dummy_func_t)hook_ExecuteISelect, (dobby_dummy_func_t*)&orig_ExecuteISelect);
         if (res == 0) {
-            write_debug("✅ ExecuteEvents.Execute hooked");
+            write_debug("✅ Execute<ISelectHandler> hooked");
         } else {
-            write_debug("❌ ExecuteEvents.Execute hook failed: " + std::to_string(res));
+            write_debug("❌ Execute<ISelectHandler> hook failed: " + std::to_string(res));
         }
     } else {
-        write_debug("❌ ExecuteEvents.Execute address not found");
+        write_debug("❌ Execute<ISelectHandler> address not found");
     }
     
     // هوک GtaMenuControl.Start
@@ -372,8 +383,9 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     g_env = env;  // ذخیره JNIEnv برای Toast
     
     const char *features[] = {
-        "Category_🎯 Button Capture",
-        "Toggle_Capture Mode (ExecuteEvents)",
+        "Category_🎯 Capture (Select)",
+        "Toggle_Capture Mode (ISelectHandler)",
+        "Button_📊 Reset Counter",
         "RichTextView_📁 Logs: /sdcard/Download/lac/",
         "RichTextView_📌 click_log.txt",
     };
@@ -392,16 +404,25 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
     
     g_env = env;  // ذخیره JNIEnv برای Toast
     
-    if (featNum == 0) {
-        g_captureEnabled = boolean;
-        if (g_captureEnabled) {
-            show_toast("🔴 Capture ON (ExecuteEvents)");
-            write_debug("🔴 Capture mode enabled");
-        } else {
-            show_toast("⚫ Capture OFF");
-            write_debug("⚫ Capture mode disabled");
-        }
-        write_log(g_clickLog, "📌 Capture mode: " + std::string(g_captureEnabled ? "ON" : "OFF"));
+    switch (featNum) {
+        case 0:
+            g_captureEnabled = boolean;
+            if (g_captureEnabled) {
+                g_clickCounter = 0;
+                show_toast("🔴 Capture ON (Select)");
+                write_debug("🔴 Capture mode enabled");
+                write_log(g_clickLog, "📌 Capture mode: ON (Counter reset)");
+            } else {
+                show_toast("⚫ Capture OFF");
+                write_debug("⚫ Capture mode disabled");
+                write_log(g_clickLog, "📌 Capture mode: OFF");
+            }
+            break;
+        case 1:
+            g_clickCounter = 0;
+            show_toast("🔄 Counter reset: 0");
+            write_log(g_clickLog, "📌 Counter reset to 0");
+            break;
     }
 }
 
