@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <vector>
 #include <sstream>
+#include <cstdlib>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -21,15 +22,18 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 #define antiCheatLibName OBFUSCATE("libunity.so")
 
-// ======================== آفست‌های آنتی‌چیت (از تحلیل) ========================
+// ======================== آفست‌های آنتی‌چیت (از r2) ========================
 #define OFFSET_PTRACE_FUNC          0x10c3efc   // fcn.010c3efc (ptrace check)
-#define OFFSET_STATUS_STRING        0x001733e1  // "/proc/self/status"
+#define OFFSET_STATUS_STRING        0x001733e2  // "/proc/self/status"
 #define OFFSET_TRACERPID_STRING     0x001affcd  // "TracerPid:"
 #define OFFSET_RO_DEBUGGABLE        0x001a6be4  // "ro.debuggable"
-#define OFFSET_MAPS_STRING          0x00217f58  // "/proc/self/maps"
+#define OFFSET_MAPS_STRING          0x00217f59  // "/proc/self/maps"
 #define OFFSET_ROOTED_1             0x00168ea6  // "rooted_or_jailbroken"
 #define OFFSET_ROOTED_2             0x0019cbf8  // "rooted_jailbroken"
-#define OFFSET_CHECKSUM             0x01801a30  // "has-checksums"
+#define OFFSET_CHECKSUM             0x0180da63  // "has-checksums"
+#define OFFSET_IL2CPP_DEBUG         0x001fbfe7  // "il2cpp_is_debugger_attached"
+#define OFFSET_WAIT_DEBUG           0x00192c78  // "wait-for-native-debugger"
+#define OFFSET_PORT_DEBUG           0x001fbc4f  // "managed-debugger-fixed-port"
 
 // ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -41,6 +45,7 @@ static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
 static void* g_gtaInstance = nullptr;
 static JNIEnv* g_env = nullptr;
+static bool g_antiCheatDisabled = false;
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -64,7 +69,7 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast ساده (با JNIEnv ذخیره شده) ========================
+// ======================== Toast ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("⚠️ JNIEnv not available for Toast");
@@ -132,7 +137,6 @@ static void install_crash_handler() {
     write_debug("✅ Crash handler installed");
 }
 
-// ======================== امنیت حافظه ========================
 static bool is_valid_address(void* addr) {
     if (!addr) return false;
     uintptr_t ptr = (uintptr_t)addr;
@@ -142,135 +146,119 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
-    if (!is_valid_address((void*)addr)) return false;
-    return KittyMemory::memRead((const void*)addr, buffer, len);
-}
-
 static bool safe_mem_write(uintptr_t addr, const void* buffer, size_t len) {
     if (!is_valid_address((void*)addr)) return false;
     return KittyMemory::memWrite((void*)addr, buffer, len);
 }
 
-// ======================== توابع IL2CPP پایه ========================
-static void* get_absolute_address(const char* lib, uintptr_t offset) {
+static void* get_abs_addr(const char* lib, uintptr_t offset) {
     return getAbsoluteAddress(lib, std::to_string(offset).c_str());
+}
+
+// ======================== توابع IL2CPP پایه ========================
+static void* get_gta_instance() {
+    if (g_gtaInstance && is_valid_address(g_gtaInstance)) return g_gtaInstance;
+    typedef void* (*get_instance_t)();
+    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0xF570C4"));
+    if (!get_Instance) return nullptr;
+    g_gtaInstance = get_Instance();
+    return g_gtaInstance;
 }
 
 // ======================== ====== آنتی‌چیت ====== ========================
 
-// ساختار برای ذخیره وضعیت
+// ساختار وضعیت
 struct AntiCheatStatus {
     bool ptrace_patched;
-    bool status_string_cleared;
+    bool status_cleared;
     bool tracerpid_cleared;
     bool ro_debuggable_cleared;
     bool maps_cleared;
-    bool rooted_1_cleared;
-    bool rooted_2_cleared;
+    bool rooted1_cleared;
+    bool rooted2_cleared;
     bool checksum_cleared;
-    std::string details;
+    bool il2cpp_debug_cleared;
+    bool wait_debug_cleared;
+    bool port_debug_cleared;
+    std::string summary;
 };
 
-static AntiCheatStatus g_acStatus;
-
-// چک کردن وضعیت هر آفست
-static bool check_patch_status(uintptr_t offset, const std::vector<uint8_t>& expected, const std::string& name) {
-    uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, offset);
-    if (!addr || !is_valid_address((void*)addr)) {
-        write_log(g_antiCheatLog, "❌ " + name + " address invalid (0x" + std::to_string(addr) + ")");
+// چک کردن وضعیت یک آفست
+static bool check_patch_status(uintptr_t offset, size_t len, const std::vector<uint8_t>& expected, const std::string& name) {
+    void* addr = get_abs_addr(antiCheatLibName, offset);
+    if (!addr || !is_valid_address(addr)) {
+        write_log(g_antiCheatLog, "❌ " + name + " address invalid");
         return false;
     }
-    std::vector<uint8_t> buffer(expected.size());
-    if (!safe_mem_read(addr, buffer.data(), buffer.size())) {
-        write_log(g_antiCheatLog, "❌ " + name + " cannot read memory");
+    std::vector<uint8_t> buffer(len);
+    if (!KittyMemory::memRead(addr, buffer.data(), len)) {
+        write_log(g_antiCheatLog, "❌ " + name + " cannot read");
         return false;
     }
     bool patched = (memcmp(buffer.data(), expected.data(), expected.size()) == 0);
-    write_log(g_antiCheatLog, (patched ? "✅ " : "❌ ") + name + (patched ? " is PATCHED" : " is ACTIVE"));
+    write_log(g_antiCheatLog, (patched ? "✅ " : "❌ ") + name + (patched ? " PATCHED" : " ACTIVE"));
     return patched;
 }
 
-// تابع اصلی چک کردن وضعیت آنتی‌چیت
+// تابع اصلی چک کردن وضعیت
 static AntiCheatStatus CheckAntiCheatStatus() {
-    write_log(g_antiCheatLog, "\n========== ANTI-CHEAT STATUS CHECK ==========");
+    write_log(g_antiCheatLog, "\n========== ANTI-CHEAT STATUS ==========");
     write_log(g_antiCheatLog, "Time: " + get_time());
     
     AntiCheatStatus status;
     status.ptrace_patched = false;
-    status.status_string_cleared = false;
+    status.status_cleared = false;
     status.tracerpid_cleared = false;
     status.ro_debuggable_cleared = false;
     status.maps_cleared = false;
-    status.rooted_1_cleared = false;
-    status.rooted_2_cleared = false;
+    status.rooted1_cleared = false;
+    status.rooted2_cleared = false;
     status.checksum_cleared = false;
-    status.details = "";
+    status.il2cpp_debug_cleared = false;
+    status.wait_debug_cleared = false;
+    status.port_debug_cleared = false;
     
-    // 1. ptrace function (0x10c3efc) - expected: mov x0,0; ret (0xd2800000, 0xc0035fd6)
+    // 1. ptrace function
     {
-        std::vector<uint8_t> expected = {0x00, 0x00, 0x80, 0xD2, 0xD6, 0x5F, 0x03, 0xC0}; // little-endian
-        status.ptrace_patched = check_patch_status(OFFSET_PTRACE_FUNC, expected, "ptrace function");
+        std::vector<uint8_t> expected = {0x00, 0x00, 0x80, 0xD2, 0xD6, 0x5F, 0x03, 0xC0};
+        status.ptrace_patched = check_patch_status(OFFSET_PTRACE_FUNC, 8, expected, "ptrace function");
     }
     
-    // 2. "/proc/self/status" string (0x001733e1) - all zeros
-    {
-        std::vector<uint8_t> expected(20, 0); // پاک شده با صفر
-        status.status_string_cleared = check_patch_status(OFFSET_STATUS_STRING, expected, "/proc/self/status string");
-    }
+    // 2. رشته‌ها (همه صفر)
+    std::vector<uint8_t> zeros24(24, 0);
+    std::vector<uint8_t> zeros16(16, 0);
+    std::vector<uint8_t> zeros12(12, 0);
+    std::vector<uint8_t> zeros64(64, 0);
     
-    // 3. "TracerPid:" string (0x001affcd) - all zeros
-    {
-        std::vector<uint8_t> expected(12, 0);
-        status.tracerpid_cleared = check_patch_status(OFFSET_TRACERPID_STRING, expected, "TracerPid: string");
-    }
-    
-    // 4. "ro.debuggable" string (0x001a6be4) - all zeros
-    {
-        std::vector<uint8_t> expected(16, 0);
-        status.ro_debuggable_cleared = check_patch_status(OFFSET_RO_DEBUGGABLE, expected, "ro.debuggable string");
-    }
-    
-    // 5. "/proc/self/maps" string (0x00217f58) - all zeros
-    {
-        std::vector<uint8_t> expected(20, 0);
-        status.maps_cleared = check_patch_status(OFFSET_MAPS_STRING, expected, "/proc/self/maps string");
-    }
-    
-    // 6. "rooted_or_jailbroken" (0x00168ea6) - all zeros
-    {
-        std::vector<uint8_t> expected(24, 0);
-        status.rooted_1_cleared = check_patch_status(OFFSET_ROOTED_1, expected, "rooted_or_jailbroken");
-    }
-    
-    // 7. "rooted_jailbroken" (0x0019cbf8) - all zeros
-    {
-        std::vector<uint8_t> expected(24, 0);
-        status.rooted_2_cleared = check_patch_status(OFFSET_ROOTED_2, expected, "rooted_jailbroken");
-    }
-    
-    // 8. "has-checksums" (0x01801a30) - all zeros
-    {
-        std::vector<uint8_t> expected(64, 0);
-        status.checksum_cleared = check_patch_status(OFFSET_CHECKSUM, expected, "has-checksums");
-    }
+    status.status_cleared = check_patch_status(OFFSET_STATUS_STRING, 24, zeros24, "/proc/self/status");
+    status.tracerpid_cleared = check_patch_status(OFFSET_TRACERPID_STRING, 12, zeros12, "TracerPid:");
+    status.ro_debuggable_cleared = check_patch_status(OFFSET_RO_DEBUGGABLE, 16, zeros16, "ro.debuggable");
+    status.maps_cleared = check_patch_status(OFFSET_MAPS_STRING, 24, zeros24, "/proc/self/maps");
+    status.rooted1_cleared = check_patch_status(OFFSET_ROOTED_1, 28, zeros24, "rooted_or_jailbroken");
+    status.rooted2_cleared = check_patch_status(OFFSET_ROOTED_2, 24, zeros24, "rooted_jailbroken");
+    status.checksum_cleared = check_patch_status(OFFSET_CHECKSUM, 64, zeros64, "has-checksums");
+    status.il2cpp_debug_cleared = check_patch_status(OFFSET_IL2CPP_DEBUG, 32, zeros24, "il2cpp_is_debugger_attached");
+    status.wait_debug_cleared = check_patch_status(OFFSET_WAIT_DEBUG, 32, zeros24, "wait-for-native-debugger");
+    status.port_debug_cleared = check_patch_status(OFFSET_PORT_DEBUG, 32, zeros24, "managed-debugger-fixed-port");
     
     // جمع‌بندی
     std::string summary = "\n📊 SUMMARY:\n";
-    summary += "ptrace function: " + std::string(status.ptrace_patched ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "/proc/self/status: " + std::string(status.status_string_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "TracerPid: " + std::string(status.tracerpid_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "ro.debuggable: " + std::string(status.ro_debuggable_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "/proc/self/maps: " + std::string(status.maps_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "rooted_or_jailbroken: " + std::string(status.rooted_1_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "rooted_jailbroken: " + std::string(status.rooted_2_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
-    summary += "has-checksums: " + std::string(status.checksum_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "ptrace function: " + std::string(status.ptrace_patched ? "✅" : "❌") + "\n";
+    summary += "/proc/self/status: " + std::string(status.status_cleared ? "✅" : "❌") + "\n";
+    summary += "TracerPid: " + std::string(status.tracerpid_cleared ? "✅" : "❌") + "\n";
+    summary += "ro.debuggable: " + std::string(status.ro_debuggable_cleared ? "✅" : "❌") + "\n";
+    summary += "/proc/self/maps: " + std::string(status.maps_cleared ? "✅" : "❌") + "\n";
+    summary += "rooted_or_jailbroken: " + std::string(status.rooted1_cleared ? "✅" : "❌") + "\n";
+    summary += "rooted_jailbroken: " + std::string(status.rooted2_cleared ? "✅" : "❌") + "\n";
+    summary += "has-checksums: " + std::string(status.checksum_cleared ? "✅" : "❌") + "\n";
+    summary += "il2cpp_is_debugger_attached: " + std::string(status.il2cpp_debug_cleared ? "✅" : "❌") + "\n";
+    summary += "wait-for-native-debugger: " + std::string(status.wait_debug_cleared ? "✅" : "❌") + "\n";
+    summary += "managed-debugger-fixed-port: " + std::string(status.port_debug_cleared ? "✅" : "❌") + "\n";
     
     write_log(g_antiCheatLog, summary);
     write_log(g_antiCheatLog, "========== CHECK COMPLETE ==========\n");
     
-    status.details = summary;
-    g_acStatus = status;
+    status.summary = summary;
     return status;
 }
 
@@ -279,24 +267,25 @@ static void DisableAntiCheat() {
     write_log(g_antiCheatLog, "\n========== DISABLE ANTI-CHEAT ==========");
     write_log(g_antiCheatLog, "Time: " + get_time());
     write_debug("🔘 Disable Anti-Cheat pressed");
+    show_toast("🛡️ Disabling Anti-Cheat...");
     
-    int successCount = 0;
-    int total = 8;
+    int success = 0;
+    int total = 11;
     
-    // 1. ptrace function (0x10c3efc) -> mov x0,0; ret
+    // 1. ptrace function -> mov x0,0; ret
     {
-        uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, OFFSET_PTRACE_FUNC);
-        uint32_t patch[] = {0xd2800000, 0xc0035fd6}; // mov x0,0; ret
-        if (safe_mem_write(addr, patch, 8)) {
+        void* addr = get_abs_addr(antiCheatLibName, OFFSET_PTRACE_FUNC);
+        uint32_t patch[] = {0xd2800000, 0xc0035fd6};
+        if (addr && safe_mem_write((uintptr_t)addr, patch, 8)) {
             write_log(g_antiCheatLog, "✅ ptrace function patched");
-            successCount++;
+            success++;
         } else {
             write_log(g_antiCheatLog, "❌ ptrace function patch failed");
         }
     }
     
     // 2. پاک کردن رشته‌ها با صفر
-    struct StringPatch {
+    struct PatchInfo {
         uintptr_t offset;
         size_t len;
         const char* name;
@@ -307,33 +296,37 @@ static void DisableAntiCheat() {
         {OFFSET_MAPS_STRING, 24, "/proc/self/maps"},
         {OFFSET_ROOTED_1, 28, "rooted_or_jailbroken"},
         {OFFSET_ROOTED_2, 24, "rooted_jailbroken"},
-        {OFFSET_CHECKSUM, 64, "has-checksums"}
+        {OFFSET_CHECKSUM, 64, "has-checksums"},
+        {OFFSET_IL2CPP_DEBUG, 32, "il2cpp_is_debugger_attached"},
+        {OFFSET_WAIT_DEBUG, 32, "wait-for-native-debugger"},
+        {OFFSET_PORT_DEBUG, 32, "managed-debugger-fixed-port"}
     };
     
     for (auto& p : patches) {
-        uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, p.offset);
+        void* addr = get_abs_addr(antiCheatLibName, p.offset);
         std::vector<uint8_t> zeros(p.len, 0);
-        if (safe_mem_write(addr, zeros.data(), zeros.size())) {
+        if (addr && safe_mem_write((uintptr_t)addr, zeros.data(), zeros.size())) {
             write_log(g_antiCheatLog, "✅ " + std::string(p.name) + " cleared");
-            successCount++;
+            success++;
         } else {
             write_log(g_antiCheatLog, "❌ " + std::string(p.name) + " clear failed");
         }
     }
     
-    write_log(g_antiCheatLog, "✅ Total patches applied: " + std::to_string(successCount) + "/" + std::to_string(total));
+    g_antiCheatDisabled = true;
+    write_log(g_antiCheatLog, "✅ Success: " + std::to_string(success) + "/" + std::to_string(total));
     write_log(g_antiCheatLog, "========== DISABLE COMPLETE ==========\n");
     
-    // دوباره وضعیت رو چک کن و به کاربر نشون بده
-    AntiCheatStatus newStatus = CheckAntiCheatStatus();
-    if (newStatus.ptrace_patched && newStatus.status_string_cleared) {
+    // دوباره چک کن
+    AntiCheatStatus status = CheckAntiCheatStatus();
+    if (status.ptrace_patched && status.status_cleared) {
         show_toast("🛡️ Anti-Cheat Disabled!");
     } else {
         show_toast("⚠️ Anti-Cheat partially disabled");
     }
 }
 
-// ======================== هوک‌های پایه (فقط برای گرفتن instance) ========================
+// ======================== هوک‌های پایه ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance) {
@@ -358,10 +351,10 @@ static void install_basic_hooks() {
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     g_env = env;
     const char *features[] = {
-        "Category_🛡️ Anti-Cheat Tools",
-        "Button_📊 Check Anti-Cheat Status",
+        "Category_🛡️ Anti-Cheat",
+        "Button_📊 Check Anti-Cheat",
         "Button_🔓 Disable Anti-Cheat",
-        "Button_📋 Show Logs Path",
+        "Button_📁 Logs Path",
         "RichTextView_📁 /sdcard/Download/lac/",
         "RichTextView_📌 anti_cheat_log.txt",
     };
@@ -400,7 +393,6 @@ void hack_thread() {
     while (!isLibraryLoaded("libil2cpp.so")) sleep(1);
     write_debug("✅ libil2cpp.so loaded");
     install_basic_hooks();
-    // صبر کن تا game ready بشه
     for (int i = 0; i < 15; i++) {
         if (g_gameReady) break;
         sleep(1);
