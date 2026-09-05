@@ -22,18 +22,18 @@
 #define targetLibName OBFUSCATE("libil2cpp.so")
 #define antiCheatLibName OBFUSCATE("libunity.so")
 
-// ======================== آفست‌های آنتی‌چیت (از r2) ========================
-#define OFFSET_PTRACE_FUNC          0x10c3efc   // fcn.010c3efc (ptrace check)
-#define OFFSET_STATUS_STRING        0x001733e2  // "/proc/self/status"
-#define OFFSET_TRACERPID_STRING     0x001affcd  // "TracerPid:"
-#define OFFSET_RO_DEBUGGABLE        0x001a6be4  // "ro.debuggable"
-#define OFFSET_MAPS_STRING          0x00217f59  // "/proc/self/maps"
-#define OFFSET_ROOTED_1             0x00168ea6  // "rooted_or_jailbroken"
-#define OFFSET_ROOTED_2             0x0019cbf8  // "rooted_jailbroken"
-#define OFFSET_CHECKSUM             0x0180da63  // "has-checksums"
-#define OFFSET_IL2CPP_DEBUG         0x001fbfe7  // "il2cpp_is_debugger_attached"
-#define OFFSET_WAIT_DEBUG           0x00192c78  // "wait-for-native-debugger"
-#define OFFSET_PORT_DEBUG           0x001fbc4f  // "managed-debugger-fixed-port"
+// ======================== آفست‌های کامل آنتی‌چیت (از r2) ========================
+#define OFFSET_PTRACE_FUNC              0x10c3efc   // ptrace check
+#define OFFSET_STATUS_STRING            0x001733e2  // "/proc/self/status"
+#define OFFSET_TRACERPID_STRING         0x001affcd  // "TracerPid:"
+#define OFFSET_RO_DEBUGGABLE            0x001a6be4  // "ro.debuggable"
+#define OFFSET_MAPS_STRING              0x00217f59  // "/proc/self/maps"
+#define OFFSET_ROOTED_1                 0x00168ea6  // "rooted_or_jailbroken"
+#define OFFSET_ROOTED_2                 0x0019cbf8  // "rooted_jailbroken"
+#define OFFSET_CHECKSUM                 0x0180da63  // "has-checksums"
+#define OFFSET_IL2CPP_DEBUG             0x001fbfe7  // "il2cpp_is_debugger_attached"
+#define OFFSET_WAIT_DEBUG               0x00192c78  // "wait-for-native-debugger"
+#define OFFSET_PORT_DEBUG               0x001fbc4f  // "managed-debugger-fixed-port"
 
 // ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
@@ -228,6 +228,7 @@ static AntiCheatStatus CheckAntiCheatStatus() {
     std::vector<uint8_t> zeros24(24, 0);
     std::vector<uint8_t> zeros16(16, 0);
     std::vector<uint8_t> zeros12(12, 0);
+    std::vector<uint8_t> zeros32(32, 0);
     std::vector<uint8_t> zeros64(64, 0);
     
     status.status_cleared = check_patch_status(OFFSET_STATUS_STRING, 24, zeros24, "/proc/self/status");
@@ -237,9 +238,9 @@ static AntiCheatStatus CheckAntiCheatStatus() {
     status.rooted1_cleared = check_patch_status(OFFSET_ROOTED_1, 28, zeros24, "rooted_or_jailbroken");
     status.rooted2_cleared = check_patch_status(OFFSET_ROOTED_2, 24, zeros24, "rooted_jailbroken");
     status.checksum_cleared = check_patch_status(OFFSET_CHECKSUM, 64, zeros64, "has-checksums");
-    status.il2cpp_debug_cleared = check_patch_status(OFFSET_IL2CPP_DEBUG, 32, zeros24, "il2cpp_is_debugger_attached");
-    status.wait_debug_cleared = check_patch_status(OFFSET_WAIT_DEBUG, 32, zeros24, "wait-for-native-debugger");
-    status.port_debug_cleared = check_patch_status(OFFSET_PORT_DEBUG, 32, zeros24, "managed-debugger-fixed-port");
+    status.il2cpp_debug_cleared = check_patch_status(OFFSET_IL2CPP_DEBUG, 32, zeros32, "il2cpp_is_debugger_attached");
+    status.wait_debug_cleared = check_patch_status(OFFSET_WAIT_DEBUG, 32, zeros32, "wait-for-native-debugger");
+    status.port_debug_cleared = check_patch_status(OFFSET_PORT_DEBUG, 32, zeros32, "managed-debugger-fixed-port");
     
     // جمع‌بندی
     std::string summary = "\n📊 SUMMARY:\n";
@@ -277,7 +278,7 @@ static void DisableAntiCheat() {
         void* addr = get_abs_addr(antiCheatLibName, OFFSET_PTRACE_FUNC);
         uint32_t patch[] = {0xd2800000, 0xc0035fd6};
         if (addr && safe_mem_write((uintptr_t)addr, patch, 8)) {
-            write_log(g_antiCheatLog, "✅ ptrace function patched");
+            write_log(g_antiCheatLog, "✅ ptrace function patched (0x" + std::to_string(OFFSET_PTRACE_FUNC) + ")");
             success++;
         } else {
             write_log(g_antiCheatLog, "❌ ptrace function patch failed");
@@ -306,7 +307,7 @@ static void DisableAntiCheat() {
         void* addr = get_abs_addr(antiCheatLibName, p.offset);
         std::vector<uint8_t> zeros(p.len, 0);
         if (addr && safe_mem_write((uintptr_t)addr, zeros.data(), zeros.size())) {
-            write_log(g_antiCheatLog, "✅ " + std::string(p.name) + " cleared");
+            write_log(g_antiCheatLog, "✅ " + std::string(p.name) + " cleared (0x" + std::to_string(p.offset) + ")");
             success++;
         } else {
             write_log(g_antiCheatLog, "❌ " + std::string(p.name) + " clear failed");
@@ -319,10 +320,12 @@ static void DisableAntiCheat() {
     
     // دوباره چک کن
     AntiCheatStatus status = CheckAntiCheatStatus();
-    if (status.ptrace_patched && status.status_cleared) {
-        show_toast("🛡️ Anti-Cheat Disabled!");
+    if (status.ptrace_patched && status.status_cleared && status.il2cpp_debug_cleared) {
+        show_toast("🛡️ Anti-Cheat Fully Disabled!");
+    } else if (success >= 8) {
+        show_toast("🛡️ Anti-Cheat Partially Disabled (" + std::to_string(success) + "/11)");
     } else {
-        show_toast("⚠️ Anti-Cheat partially disabled");
+        show_toast("⚠️ Anti-Cheat Disable Failed");
     }
 }
 
@@ -353,7 +356,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         "Category_🛡️ Anti-Cheat",
         "Button_📊 Check Anti-Cheat",
-        "Button_🔓 Disable Anti-Cheat",
+        "Button_🔓 Disable Anti-Cheat (11 Patches)",
         "Button_📁 Logs Path",
         "RichTextView_📁 /sdcard/Download/lac/",
         "RichTextView_📌 anti_cheat_log.txt",
