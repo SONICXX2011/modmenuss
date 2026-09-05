@@ -8,6 +8,8 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/stat.h>
+#include <vector>
+#include <sstream>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.hpp"
@@ -19,33 +21,35 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌های جدید از Dump5 ========================
+// ======================== آفست‌های نهایی ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_ONPOINTERCLICK           0x1F14A4C   // OnPointerClick
+#define OFFSET_BUTTON_PRESS             0x1F14A14   // ✅ UnityEngine.UI.Button.Press
 
 #define MAX_WAIT 30
+#define MAX_BUTTONS 30
 
 // ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
 static std::string g_clickLog = g_basePath + "click_log.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
+static std::string g_buttonsLog = g_basePath + "buttons_list.txt";
 
 // ======================== متغیرهای سراسری ========================
 static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
-static bool g_captureEnabled = false;
-static bool g_hooksInstalled = false;
+static bool g_hookInstalled = false;
 static void* g_gtaInstance = nullptr;
 static JNIEnv* g_env = nullptr;
+static bool g_captureEnabled = false;
 static int g_clickCounter = 0;
 
-// ====== پوینتر تابع اصلی ======
-void (*orig_OnPointerClick)(void* button, void* eventData);
+// ======================== پوینتر تابع اصلی ========================
+void (*orig_ButtonPress)(void* button);
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -69,7 +73,7 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast ========================
+// ======================== Toast با JNIEnv ذخیره شده ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("⚠️ JNIEnv not available for Toast");
@@ -92,6 +96,7 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
+    // گرفتن Application Context از ActivityThread
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
@@ -156,7 +161,7 @@ static void show_toast(const std::string& msg) {
     env->DeleteLocalRef(activityThread);
 }
 
-// ======================== کرش‌گیر کامل ========================
+// ======================== کرش‌گیر ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -203,7 +208,7 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== توابع IL2CPP امن ========================
+// ======================== توابع IL2CPP ========================
 static void* create_mono_string(const char* str) {
     if (!str) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -268,51 +273,48 @@ static std::string get_button_name_safe(void* obj) {
     return "";
 }
 
-// ======================== هوک OnPointerClick ========================
-void hook_OnPointerClick(void* button, void* eventData) {
+// ======================== هوک Button.Press ========================
+void hook_ButtonPress(void* button) {
     if (g_captureEnabled && g_gameReady && button && is_valid_address(button)) {
         g_clickCounter++;
         std::string name = get_button_name_safe(button);
         if (!name.empty()) {
-            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] " + name);
-            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | " + name);
+            std::string msg = "🔵 [" + std::to_string(g_clickCounter) + "] " + name;
+            show_toast(msg);
+            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | " + name);
             write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
         } else {
-            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] Unknown");
-            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | Unknown");
+            std::string msg = "🔵 [" + std::to_string(g_clickCounter) + "] Unknown";
+            show_toast(msg);
+            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | Unknown");
             write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
         }
     }
-    if (orig_OnPointerClick) {
-        orig_OnPointerClick(button, eventData);
+    
+    if (orig_ButtonPress) {
+        orig_ButtonPress(button);
     }
 }
 
-// ======================== نصب هوک (فقط یک بار) ========================
-static void install_hooks_once() {
-    if (g_hooksInstalled) return;
-    
-#if defined(__aarch64__)
-    void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F14A4C"));
-    if (addr && is_valid_address(addr)) {
-        int res = DobbyHook(addr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
-        if (res == 0) {
-            g_hooksInstalled = true;
-            write_debug("✅ OnPointerClick hooked successfully");
-        } else {
-            write_debug("❌ OnPointerClick hook failed: " + std::to_string(res));
+// ======================== هوک GtaMenuControl.Start ========================
+void (*orig_GtaMenuStart)(void *instance);
+void hook_GtaMenuStart(void *instance) {
+    if (instance && is_valid_address(instance)) {
+        g_gtaInstance = instance;
+        if (!g_gameReady) {
+            g_gameReady = true;
+            write_debug("✅ Game ready!");
         }
-    } else {
-        write_debug("❌ OnPointerClick address not found");
     }
-#endif
+    if (orig_GtaMenuStart) {
+        orig_GtaMenuStart(instance);
+    }
 }
 
-// ======================== ترد اصلی (سبک و بدون حلقه‌ی بی‌نهایت) ========================
-void hack_thread() {
-    write_debug("⏳ Mod loaded, waiting for game...");
+// ======================== نصب هوک‌ها ========================
+static void install_hooks_with_delay() {
+    write_debug("⏳ Waiting for game to load...");
     
-    // ۱. منتظر لود شدن libil2cpp.so
     int waitCount = 0;
     while (!isLibraryLoaded(targetLibName) && waitCount < MAX_WAIT) {
         sleep(1);
@@ -320,12 +322,11 @@ void hack_thread() {
     }
     
     if (waitCount >= MAX_WAIT) {
-        write_debug("❌ Timeout waiting for libil2cpp.so");
+        write_debug("❌ Timeout! libil2cpp.so not loaded!");
         return;
     }
     write_debug("✅ libil2cpp.so loaded");
     
-    // ۲. منتظر آماده شدن GtaMenuControl instance (بدون هیچ هوکی)
     waitCount = 0;
     while (waitCount < MAX_WAIT) {
         void* instance = get_gta_instance_safe();
@@ -340,10 +341,72 @@ void hack_thread() {
     }
     
     if (!g_gameReady) {
-        write_debug("⚠️ GtaMenuControl instance not ready, but will try later when capture enabled");
+        write_debug("⚠️ No instance yet, will use hook");
     }
     
+#if defined(__aarch64__)
+    // هوک Button.Press (آفست 0x1F14A14)
+    void* pressAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F14A14"));
+    if (pressAddr && is_valid_address(pressAddr)) {
+        int res = DobbyHook(pressAddr, (dobby_dummy_func_t)hook_ButtonPress, (dobby_dummy_func_t*)&orig_ButtonPress);
+        if (res == 0) {
+            g_hookInstalled = true;
+            write_debug("✅ Button.Press hooked (0x1F14A14)");
+        } else {
+            write_debug("❌ Button.Press hook failed: " + std::to_string(res));
+        }
+    } else {
+        write_debug("❌ Button.Press address not found");
+    }
+    
+    // هوک GtaMenuControl.Start
+    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
+    if (startAddr && is_valid_address(startAddr)) {
+        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+        write_debug("✅ GtaMenuControl.Start() hooked (passive)");
+    }
+#endif
+    
     write_debug("✅ Mod ready, waiting for user to enable capture");
+}
+
+// ======================== نمایش همه دکمه‌ها (بدون هوک) ========================
+static void ShowAllButtons() {
+    write_log(g_buttonsLog, "\n========== ALL BUTTONS ==========");
+    write_log(g_buttonsLog, "Time: " + get_time());
+    
+    void* instance = get_gta_instance_safe();
+    if (!instance || !is_valid_address(instance)) {
+        write_log(g_buttonsLog, "❌ No instance!");
+        write_log(g_buttonsLog, "========== DONE ==========\n");
+        return;
+    }
+    
+    void** menuButtons = *(void***)((uintptr_t)instance + 0x30);
+    if (!menuButtons || !is_valid_address(menuButtons)) {
+        write_log(g_buttonsLog, "❌ menuButtons is null!");
+        write_log(g_buttonsLog, "========== DONE ==========\n");
+        return;
+    }
+    
+    int found = 0;
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
+        if (!is_valid_address((void*)btnAddr)) break;
+        
+        void* btn = *(void**)btnAddr;
+        if (!btn || !is_valid_address(btn)) break;
+        
+        std::string name = get_button_name_safe(btn);
+        if (name.empty()) continue;
+        
+        write_log(g_buttonsLog, "  Button[" + std::to_string(i) + "] = " + name);
+        write_log(g_buttonsLog, "     Address: 0x" + std::to_string((uintptr_t)btn));
+        found++;
+    }
+    
+    write_log(g_buttonsLog, "\n✅ Total buttons found: " + std::to_string(found));
+    write_log(g_buttonsLog, "========== DONE ==========\n");
 }
 
 // ======================== منو ========================
@@ -353,9 +416,9 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
         "Category_🎯 Button Capture",
         "Toggle_🔴 Enable Capture",
+        "Button_📋 Show All Buttons",
         "Button_📊 Reset Counter",
         "RichTextView_📁 Logs: /sdcard/Download/lac/",
-        "RichTextView_📌 click_log.txt",
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = (jobjectArray)env->NewObjectArray(
@@ -373,47 +436,37 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
     g_env = env;
     
     switch (featNum) {
-        case 0: {
+        case 0:
             g_captureEnabled = boolean;
-            
-            if (boolean) {
-                // فقط وقتی کاربر روشن کرد، هوک نصب کن
-                install_hooks_once();
-                
-                // اگر instance آماده نبود، دوباره بگیر
-                if (!g_gtaInstance) {
-                    void* instance = get_gta_instance_safe();
-                    if (instance && is_valid_address(instance)) {
-                        g_gtaInstance = instance;
-                        g_gameReady = true;
-                        write_debug("✅ GtaMenuControl instance captured on enable");
-                    }
-                }
-                
-                if (!g_gameReady) {
-                    write_debug("⚠️ GtaMenuControl instance not ready yet, capture may not work");
-                    show_toast("⚠️ Game not ready, try again later");
-                } else {
-                    g_clickCounter = 0;
-                    show_toast("🔴 Capture ON");
-                    write_debug("🔴 Capture mode enabled");
-                    write_log(g_clickLog, "📌 Capture: ON");
-                }
+            if (g_captureEnabled) {
+                g_clickCounter = 0;
+                show_toast("🔴 Capture ON");
+                write_debug("🔴 Capture mode enabled");
+                write_log(g_clickLog, "📌 Capture: ON");
             } else {
                 show_toast("⚫ Capture OFF");
                 write_debug("⚫ Capture mode disabled");
                 write_log(g_clickLog, "📌 Capture: OFF");
             }
             break;
-        }
-        
-        case 1: {
+            
+        case 1:
+            write_log(g_buttonsLog, "🔘 Show All Buttons pressed");
+            ShowAllButtons();
+            break;
+            
+        case 2:
             g_clickCounter = 0;
             show_toast("🔄 Counter reset: 0");
             write_log(g_clickLog, "📌 Counter reset to 0");
             break;
-        }
     }
+}
+
+// ======================== ترد اصلی ========================
+void hack_thread() {
+    install_hooks_with_delay();
+    write_debug("✅ hack_thread finished");
 }
 
 // ======================== تابع ورودی ========================
@@ -421,7 +474,6 @@ __attribute__((constructor))
 void lib_main() {
     mkdir(g_basePath.c_str(), 0777);
     install_crash_handler();
-    
-    write_debug("🚀 Mod loaded - waiting for user");
+    write_debug("🚀 Mod loaded");
     std::thread(hack_thread).detach();
 }
