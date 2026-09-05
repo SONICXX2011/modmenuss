@@ -36,13 +36,13 @@
 #define OFFSET_WAIT_DEBUG               0x00192c78
 #define OFFSET_PORT_DEBUG               0x001fbc4f
 
-// ======================== آفست‌های هوک ========================
+// ======================== آفست‌های بازی ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
 #define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
 #define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_ONPOINTERCLICK           0x1F14A4C   // Button.OnPointerClick
+#define OFFSET_BUTTON_PRESS             0x1F14A14
 
 #define MAX_WAIT 30
 
@@ -61,7 +61,8 @@ static JNIEnv* g_env = nullptr;
 static bool g_captureEnabled = false;
 static int g_clickCounter = 0;
 
-void (*orig_OnPointerClick)(void* button, void* eventData);
+void (*orig_ButtonPress)(void* button);
+void (*orig_GtaMenuStart)(void *instance);
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -85,31 +86,9 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
+// ====== Toast خالی (هیچ کاری نمیکنه) ======
 static void show_toast(const std::string& msg) {
-    if (!g_env) { write_debug("⚠️ JNIEnv not available"); return; }
-    JNIEnv* env = g_env;
-    jclass toastClass = env->FindClass("android/widget/Toast");
-    if (!toastClass) { env->ExceptionClear(); return; }
-    jmethodID makeTextMethod = env->GetStaticMethodID(toastClass, "makeText", "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
-    if (!makeTextMethod) { env->ExceptionClear(); return; }
-    jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
-    if (!activityThreadClass) { env->ExceptionClear(); return; }
-    jmethodID currentActivityThreadMethod = env->GetStaticMethodID(activityThreadClass, "currentActivityThread", "()Landroid/app/ActivityThread;");
-    if (!currentActivityThreadMethod) { env->ExceptionClear(); return; }
-    jobject activityThread = env->CallStaticObjectMethod(activityThreadClass, currentActivityThreadMethod);
-    if (!activityThread) { env->ExceptionClear(); return; }
-    jmethodID getApplicationMethod = env->GetMethodID(activityThreadClass, "getApplication", "()Landroid/app/Application;");
-    if (!getApplicationMethod) { env->ExceptionClear(); return; }
-    jobject context = env->CallObjectMethod(activityThread, getApplicationMethod);
-    if (!context) { env->ExceptionClear(); return; }
-    jstring jMsg = env->NewStringUTF(msg.c_str());
-    if (!jMsg) { env->ExceptionClear(); return; }
-    jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0);
-    env->DeleteLocalRef(jMsg);
-    if (!toast) { env->ExceptionClear(); return; }
-    jmethodID showMethod = env->GetMethodID(toastClass, "show", "()V");
-    if (!showMethod) { env->ExceptionClear(); return; }
-    env->CallVoidMethod(toast, showMethod);
+    // Toast حذف شده - فقط لاگ گرفته میشه
 }
 
 // ======================== کرش‌گیر ========================
@@ -223,8 +202,7 @@ static std::string get_button_name_safe(void* obj) {
     return "";
 }
 
-// ======================== ====== آنتی‌چیت خودکار ====== ========================
-
+// ======================== آنتی‌چیت خودکار ========================
 static void PatchAntiCheat() {
     write_log(g_antiCheatLog, "\n========== AUTO-PATCHING ANTI-CHEAT ==========");
     write_log(g_antiCheatLog, "Time: " + get_time());
@@ -233,7 +211,6 @@ static void PatchAntiCheat() {
     int success = 0;
     int total = 11;
     
-    // 1. ptrace function
     {
         void* addr = get_abs_addr(antiCheatLibName, OFFSET_PTRACE_FUNC);
         uint32_t patch[] = {0xd2800000, 0xc0035fd6};
@@ -245,7 +222,6 @@ static void PatchAntiCheat() {
         }
     }
     
-    // 2. پاک کردن رشته‌ها
     struct PatchInfo {
         uintptr_t offset;
         size_t len;
@@ -279,27 +255,23 @@ static void PatchAntiCheat() {
     write_debug("🛡️ Anti-Cheat patched (" + std::to_string(success) + "/11)");
 }
 
-// ======================== ====== هوک‌ها ====== ========================
-
-void hook_OnPointerClick(void* button, void* eventData) {
+// ======================== هوک Button.Press ========================
+void hook_ButtonPress(void* button) {
     if (g_captureEnabled && g_gameReady && button && is_valid_address(button)) {
         g_clickCounter++;
         std::string name = get_button_name_safe(button);
         if (!name.empty()) {
-            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] " + name);
-            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | " + name);
+            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | " + name);
             write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
         } else {
-            show_toast("🔵 [" + std::to_string(g_clickCounter) + "] Unknown");
-            write_log(g_clickLog, "[OnPointerClick] #" + std::to_string(g_clickCounter) + " | Unknown");
+            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | Unknown");
             write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
         }
     }
-    if (orig_OnPointerClick) orig_OnPointerClick(button, eventData);
+    if (orig_ButtonPress) orig_ButtonPress(button);
 }
 
 // ======================== هوک GtaMenuControl.Start ========================
-void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
     if (instance && is_valid_address(instance)) {
         g_gtaInstance = instance;
@@ -321,24 +293,23 @@ static void InstallHooks() {
     write_debug("🔧 Installing hooks...");
     
 #if defined(__aarch64__)
-    // OnPointerClick
-    void* onPointerClickAddr = getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1F14A4C"));
-    if (onPointerClickAddr && is_valid_address(onPointerClickAddr)) {
-        if (DobbyHook(onPointerClickAddr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick) == 0) {
+    void* pressAddr = getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1F14A14"));
+    if (pressAddr && is_valid_address(pressAddr)) {
+        if (DobbyHook(pressAddr, (dobby_dummy_func_t)hook_ButtonPress, (dobby_dummy_func_t*)&orig_ButtonPress) == 0) {
             g_hooksInstalled = true;
-            write_debug("✅ OnPointerClick hooked");
+            write_debug("✅ Button.Press hooked (0x1F14A14)");
         } else {
-            write_debug("❌ OnPointerClick hook failed");
+            write_debug("❌ Button.Press hook failed");
         }
     } else {
-        write_debug("❌ OnPointerClick address not found");
+        write_debug("❌ Button.Press address not found");
     }
 #endif
     
     if (g_hooksInstalled) {
-        show_toast("🔧 Hooks installed");
+        write_debug("🔧 Hooks installed");
     } else {
-        show_toast("❌ Hook installation failed");
+        write_debug("❌ Hook installation failed");
     }
 }
 
@@ -370,23 +341,19 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
         case 0:
             g_captureEnabled = boolean;
             if (boolean) {
-                // نصب هوک‌ها فقط وقتی کاربر روشن کنه
                 if (!g_hooksInstalled) {
                     InstallHooks();
                 }
                 g_clickCounter = 0;
-                show_toast("🔴 Capture ON");
                 write_debug("🔴 Capture mode enabled");
                 write_log(g_clickLog, "📌 Capture: ON");
             } else {
-                show_toast("⚫ Capture OFF");
                 write_debug("⚫ Capture mode disabled");
                 write_log(g_clickLog, "📌 Capture: OFF");
             }
             break;
         case 1:
             g_clickCounter = 0;
-            show_toast("🔄 Counter reset: 0");
             write_log(g_clickLog, "📌 Counter reset to 0");
             break;
     }
@@ -398,17 +365,14 @@ void hack_thread() {
     while (!isLibraryLoaded("libil2cpp.so")) sleep(1);
     write_debug("✅ libil2cpp.so loaded");
     
-    // ====== 1. پچ خودکار آنتی‌چیت ======
     PatchAntiCheat();
     
-    // ====== 2. هوک GtaMenuControl.Start (فقط برای گرفتن instance) ======
     void* startAddr = getAbsoluteAddress("libil2cpp.so", "0xF571A4");
     if (startAddr) {
         DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
         write_debug("✅ GtaMenuControl.Start() hooked (passive)");
     }
     
-    // ====== 3. منتظر آماده شدن بازی ======
     for (int i = 0; i < 15; i++) {
         if (g_gameReady) break;
         sleep(1);
