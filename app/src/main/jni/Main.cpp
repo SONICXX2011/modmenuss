@@ -16,40 +16,31 @@
 #include "Menu/Menu.hpp"
 #include "Menu/Jni.hpp"
 #include "Includes/Macros.h"
-#include "dobby.h"
 #include "KittyMemory/KittyMemory.hpp"
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
+#define antiCheatLibName OBFUSCATE("libunity.so")
 
-// ======================== آفست‌های نهایی ========================
-#define OFFSET_GTA_GET_INSTANCE         0xF570C4
-#define OFFSET_GTA_START                0xF571A4
-#define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
-#define OFFSET_IL2CPP_STRING_NEW        0xE40BF0
-#define OFFSET_GAMEOBJECT_NAME          0x20
-#define OFFSET_BUTTON_PRESS             0x1F14A14   // ✅ UnityEngine.UI.Button.Press
-
-#define MAX_WAIT 30
-#define MAX_BUTTONS 30
+// ======================== آفست‌های آنتی‌چیت (از تحلیل) ========================
+#define OFFSET_PTRACE_FUNC          0x10c3efc   // fcn.010c3efc (ptrace check)
+#define OFFSET_STATUS_STRING        0x001733e1  // "/proc/self/status"
+#define OFFSET_TRACERPID_STRING     0x001affcd  // "TracerPid:"
+#define OFFSET_RO_DEBUGGABLE        0x001a6be4  // "ro.debuggable"
+#define OFFSET_MAPS_STRING          0x00217f58  // "/proc/self/maps"
+#define OFFSET_ROOTED_1             0x00168ea6  // "rooted_or_jailbroken"
+#define OFFSET_ROOTED_2             0x0019cbf8  // "rooted_jailbroken"
+#define OFFSET_CHECKSUM             0x01801a30  // "has-checksums"
 
 // ======================== مسیرهای لاگ ========================
 static std::string g_basePath = "/storage/emulated/0/Download/lac/";
-static std::string g_clickLog = g_basePath + "click_log.txt";
+static std::string g_antiCheatLog = g_basePath + "anti_cheat_log.txt";
 static std::string g_crashLog = g_basePath + "crash_log.txt";
 static std::string g_debugLog = g_basePath + "mod_debug.txt";
-static std::string g_buttonsLog = g_basePath + "buttons_list.txt";
 
-// ======================== متغیرهای سراسری ========================
 static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
-static bool g_hookInstalled = false;
 static void* g_gtaInstance = nullptr;
 static JNIEnv* g_env = nullptr;
-static bool g_captureEnabled = false;
-static int g_clickCounter = 0;
-
-// ======================== پوینتر تابع اصلی ========================
-void (*orig_ButtonPress)(void* button);
 
 // ======================== توابع کمکی ========================
 static std::string get_time() {
@@ -73,92 +64,35 @@ static void write_debug(const std::string& msg) {
     LOGI("[Debug] %s", msg.c_str());
 }
 
-// ======================== Toast با JNIEnv ذخیره شده ========================
+// ======================== Toast ساده (با JNIEnv ذخیره شده) ========================
 static void show_toast(const std::string& msg) {
     if (!g_env) {
         write_debug("⚠️ JNIEnv not available for Toast");
         return;
     }
-    
     JNIEnv* env = g_env;
-    
     jclass toastClass = env->FindClass("android/widget/Toast");
-    if (!toastClass) {
-        env->ExceptionClear();
-        write_debug("❌ Toast class not found");
-        return;
-    }
-    
+    if (!toastClass) { env->ExceptionClear(); return; }
     jmethodID makeTextMethod = env->GetStaticMethodID(toastClass, "makeText", "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
-    if (!makeTextMethod) {
-        env->ExceptionClear();
-        write_debug("❌ Toast.makeText not found");
-        return;
-    }
-    
-    // گرفتن Application Context از ActivityThread
+    if (!makeTextMethod) { env->ExceptionClear(); return; }
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
-    if (!activityThreadClass) {
-        env->ExceptionClear();
-        write_debug("❌ ActivityThread class not found");
-        return;
-    }
-    
+    if (!activityThreadClass) { env->ExceptionClear(); return; }
     jmethodID currentActivityThreadMethod = env->GetStaticMethodID(activityThreadClass, "currentActivityThread", "()Landroid/app/ActivityThread;");
-    if (!currentActivityThreadMethod) {
-        env->ExceptionClear();
-        write_debug("❌ currentActivityThread not found");
-        return;
-    }
-    
+    if (!currentActivityThreadMethod) { env->ExceptionClear(); return; }
     jobject activityThread = env->CallStaticObjectMethod(activityThreadClass, currentActivityThreadMethod);
-    if (!activityThread) {
-        env->ExceptionClear();
-        write_debug("❌ ActivityThread is null");
-        return;
-    }
-    
+    if (!activityThread) { env->ExceptionClear(); return; }
     jmethodID getApplicationMethod = env->GetMethodID(activityThreadClass, "getApplication", "()Landroid/app/Application;");
-    if (!getApplicationMethod) {
-        env->ExceptionClear();
-        write_debug("❌ getApplication not found");
-        return;
-    }
-    
+    if (!getApplicationMethod) { env->ExceptionClear(); return; }
     jobject context = env->CallObjectMethod(activityThread, getApplicationMethod);
-    if (!context) {
-        env->ExceptionClear();
-        write_debug("❌ Application context is null");
-        return;
-    }
-    
+    if (!context) { env->ExceptionClear(); return; }
     jstring jMsg = env->NewStringUTF(msg.c_str());
-    if (!jMsg) {
-        env->ExceptionClear();
-        write_debug("❌ Failed to create jstring");
-        return;
-    }
-    
+    if (!jMsg) { env->ExceptionClear(); return; }
     jobject toast = env->CallStaticObjectMethod(toastClass, makeTextMethod, context, jMsg, 0);
     env->DeleteLocalRef(jMsg);
-    
-    if (!toast) {
-        env->ExceptionClear();
-        write_debug("❌ Toast.makeText returned null");
-        return;
-    }
-    
+    if (!toast) { env->ExceptionClear(); return; }
     jmethodID showMethod = env->GetMethodID(toastClass, "show", "()V");
-    if (!showMethod) {
-        env->ExceptionClear();
-        write_debug("❌ Toast.show not found");
-        return;
-    }
-    
+    if (!showMethod) { env->ExceptionClear(); return; }
     env->CallVoidMethod(toast, showMethod);
-    env->DeleteLocalRef(toast);
-    env->DeleteLocalRef(context);
-    env->DeleteLocalRef(activityThread);
 }
 
 // ======================== کرش‌گیر ========================
@@ -208,217 +142,228 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== توابع IL2CPP ========================
-static void* create_mono_string(const char* str) {
-    if (!str) return nullptr;
-    typedef void* (*il2cpp_string_new_t)(const char*);
-    il2cpp_string_new_t il2cpp_string_new = 
-        (il2cpp_string_new_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0xE40BF0"));
-    if (!il2cpp_string_new) return nullptr;
-    return il2cpp_string_new(str);
+static bool safe_mem_read(uintptr_t addr, void* buffer, size_t len) {
+    if (!is_valid_address((void*)addr)) return false;
+    return KittyMemory::memRead((const void*)addr, buffer, len);
 }
 
-static std::string mono_to_string_safe(void* monoStr) {
-    if (!monoStr || !is_valid_address(monoStr)) return "";
-    typedef int32_t (*len_t)(void*);
-    typedef uint16_t* (*chars_t)(void*);
-    len_t get_len = (len_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_length");
-    chars_t get_chars = (chars_t)getAbsoluteAddress("libil2cpp.so", "il2cpp_string_chars");
-    if (!get_len || !get_chars) return "";
-    int len = get_len(monoStr);
-    if (len <= 0 || len > 65536) return "";
-    uint16_t* chars = get_chars(monoStr);
-    if (!chars || !is_valid_address(chars)) return "";
-    std::string result;
-    result.reserve(len);
-    for (int i = 0; i < len; i++) {
-        result += (char)(chars[i] & 0xFF);
-    }
-    return result;
+static bool safe_mem_write(uintptr_t addr, const void* buffer, size_t len) {
+    if (!is_valid_address((void*)addr)) return false;
+    return KittyMemory::memWrite((void*)addr, buffer, len);
 }
 
-static void* get_gta_instance_safe() {
-    if (g_gtaInstance && is_valid_address(g_gtaInstance)) {
-        return g_gtaInstance;
-    }
-    typedef void* (*get_instance_t)();
-    get_instance_t get_Instance = (get_instance_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0xF570C4"));
-    if (!get_Instance) return nullptr;
-    void* instance = get_Instance();
-    if (instance && is_valid_address(instance)) {
-        g_gtaInstance = instance;
-        return instance;
-    }
-    return nullptr;
+// ======================== توابع IL2CPP پایه ========================
+static void* get_absolute_address(const char* lib, uintptr_t offset) {
+    return getAbsoluteAddress(lib, std::to_string(offset).c_str());
 }
 
-static std::string get_button_name_safe(void* obj) {
-    if (!obj || !is_valid_address(obj)) return "";
+// ======================== ====== آنتی‌چیت ====== ========================
+
+// ساختار برای ذخیره وضعیت
+struct AntiCheatStatus {
+    bool ptrace_patched;
+    bool status_string_cleared;
+    bool tracerpid_cleared;
+    bool ro_debuggable_cleared;
+    bool maps_cleared;
+    bool rooted_1_cleared;
+    bool rooted_2_cleared;
+    bool checksum_cleared;
+    std::string details;
+};
+
+static AntiCheatStatus g_acStatus;
+
+// چک کردن وضعیت هر آفست
+static bool check_patch_status(uintptr_t offset, const std::vector<uint8_t>& expected, const std::string& name) {
+    uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, offset);
+    if (!addr || !is_valid_address((void*)addr)) {
+        write_log(g_antiCheatLog, "❌ " + name + " address invalid (0x" + std::to_string(addr) + ")");
+        return false;
+    }
+    std::vector<uint8_t> buffer(expected.size());
+    if (!safe_mem_read(addr, buffer.data(), buffer.size())) {
+        write_log(g_antiCheatLog, "❌ " + name + " cannot read memory");
+        return false;
+    }
+    bool patched = (memcmp(buffer.data(), expected.data(), expected.size()) == 0);
+    write_log(g_antiCheatLog, (patched ? "✅ " : "❌ ") + name + (patched ? " is PATCHED" : " is ACTIVE"));
+    return patched;
+}
+
+// تابع اصلی چک کردن وضعیت آنتی‌چیت
+static AntiCheatStatus CheckAntiCheatStatus() {
+    write_log(g_antiCheatLog, "\n========== ANTI-CHEAT STATUS CHECK ==========");
+    write_log(g_antiCheatLog, "Time: " + get_time());
     
-    void* namePtr = *(void**)((uintptr_t)obj + OFFSET_GAMEOBJECT_NAME);
-    if (namePtr && is_valid_address(namePtr)) {
-        std::string name = mono_to_string_safe(namePtr);
-        if (!name.empty()) return name;
+    AntiCheatStatus status;
+    status.ptrace_patched = false;
+    status.status_string_cleared = false;
+    status.tracerpid_cleared = false;
+    status.ro_debuggable_cleared = false;
+    status.maps_cleared = false;
+    status.rooted_1_cleared = false;
+    status.rooted_2_cleared = false;
+    status.checksum_cleared = false;
+    status.details = "";
+    
+    // 1. ptrace function (0x10c3efc) - expected: mov x0,0; ret (0xd2800000, 0xc0035fd6)
+    {
+        std::vector<uint8_t> expected = {0x00, 0x00, 0x80, 0xD2, 0xD6, 0x5F, 0x03, 0xC0}; // little-endian
+        status.ptrace_patched = check_patch_status(OFFSET_PTRACE_FUNC, expected, "ptrace function");
     }
     
-    typedef void* (*get_name_t)(void*);
-    get_name_t get_name = (get_name_t)getAbsoluteAddress("libil2cpp.so", OBFUSCATE("0x1E7CE6C"));
-    if (get_name) {
-        void* monoStr = get_name(obj);
-        if (monoStr && is_valid_address(monoStr)) {
-            return mono_to_string_safe(monoStr);
-        }
+    // 2. "/proc/self/status" string (0x001733e1) - all zeros
+    {
+        std::vector<uint8_t> expected(20, 0); // پاک شده با صفر
+        status.status_string_cleared = check_patch_status(OFFSET_STATUS_STRING, expected, "/proc/self/status string");
     }
     
-    return "";
+    // 3. "TracerPid:" string (0x001affcd) - all zeros
+    {
+        std::vector<uint8_t> expected(12, 0);
+        status.tracerpid_cleared = check_patch_status(OFFSET_TRACERPID_STRING, expected, "TracerPid: string");
+    }
+    
+    // 4. "ro.debuggable" string (0x001a6be4) - all zeros
+    {
+        std::vector<uint8_t> expected(16, 0);
+        status.ro_debuggable_cleared = check_patch_status(OFFSET_RO_DEBUGGABLE, expected, "ro.debuggable string");
+    }
+    
+    // 5. "/proc/self/maps" string (0x00217f58) - all zeros
+    {
+        std::vector<uint8_t> expected(20, 0);
+        status.maps_cleared = check_patch_status(OFFSET_MAPS_STRING, expected, "/proc/self/maps string");
+    }
+    
+    // 6. "rooted_or_jailbroken" (0x00168ea6) - all zeros
+    {
+        std::vector<uint8_t> expected(24, 0);
+        status.rooted_1_cleared = check_patch_status(OFFSET_ROOTED_1, expected, "rooted_or_jailbroken");
+    }
+    
+    // 7. "rooted_jailbroken" (0x0019cbf8) - all zeros
+    {
+        std::vector<uint8_t> expected(24, 0);
+        status.rooted_2_cleared = check_patch_status(OFFSET_ROOTED_2, expected, "rooted_jailbroken");
+    }
+    
+    // 8. "has-checksums" (0x01801a30) - all zeros
+    {
+        std::vector<uint8_t> expected(64, 0);
+        status.checksum_cleared = check_patch_status(OFFSET_CHECKSUM, expected, "has-checksums");
+    }
+    
+    // جمع‌بندی
+    std::string summary = "\n📊 SUMMARY:\n";
+    summary += "ptrace function: " + std::string(status.ptrace_patched ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "/proc/self/status: " + std::string(status.status_string_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "TracerPid: " + std::string(status.tracerpid_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "ro.debuggable: " + std::string(status.ro_debuggable_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "/proc/self/maps: " + std::string(status.maps_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "rooted_or_jailbroken: " + std::string(status.rooted_1_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "rooted_jailbroken: " + std::string(status.rooted_2_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    summary += "has-checksums: " + std::string(status.checksum_cleared ? "✅ PATCHED" : "❌ ACTIVE") + "\n";
+    
+    write_log(g_antiCheatLog, summary);
+    write_log(g_antiCheatLog, "========== CHECK COMPLETE ==========\n");
+    
+    status.details = summary;
+    g_acStatus = status;
+    return status;
 }
 
-// ======================== هوک Button.Press ========================
-void hook_ButtonPress(void* button) {
-    if (g_captureEnabled && g_gameReady && button && is_valid_address(button)) {
-        g_clickCounter++;
-        std::string name = get_button_name_safe(button);
-        if (!name.empty()) {
-            std::string msg = "🔵 [" + std::to_string(g_clickCounter) + "] " + name;
-            show_toast(msg);
-            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | " + name);
-            write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
+// ====== غیرفعال کردن آنتی‌چیت ======
+static void DisableAntiCheat() {
+    write_log(g_antiCheatLog, "\n========== DISABLE ANTI-CHEAT ==========");
+    write_log(g_antiCheatLog, "Time: " + get_time());
+    write_debug("🔘 Disable Anti-Cheat pressed");
+    
+    int successCount = 0;
+    int total = 8;
+    
+    // 1. ptrace function (0x10c3efc) -> mov x0,0; ret
+    {
+        uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, OFFSET_PTRACE_FUNC);
+        uint32_t patch[] = {0xd2800000, 0xc0035fd6}; // mov x0,0; ret
+        if (safe_mem_write(addr, patch, 8)) {
+            write_log(g_antiCheatLog, "✅ ptrace function patched");
+            successCount++;
         } else {
-            std::string msg = "🔵 [" + std::to_string(g_clickCounter) + "] Unknown";
-            show_toast(msg);
-            write_log(g_clickLog, "[Button.Press] #" + std::to_string(g_clickCounter) + " | Unknown");
-            write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
+            write_log(g_antiCheatLog, "❌ ptrace function patch failed");
         }
     }
     
-    if (orig_ButtonPress) {
-        orig_ButtonPress(button);
+    // 2. پاک کردن رشته‌ها با صفر
+    struct StringPatch {
+        uintptr_t offset;
+        size_t len;
+        const char* name;
+    } patches[] = {
+        {OFFSET_STATUS_STRING, 24, "/proc/self/status"},
+        {OFFSET_TRACERPID_STRING, 12, "TracerPid:"},
+        {OFFSET_RO_DEBUGGABLE, 16, "ro.debuggable"},
+        {OFFSET_MAPS_STRING, 24, "/proc/self/maps"},
+        {OFFSET_ROOTED_1, 28, "rooted_or_jailbroken"},
+        {OFFSET_ROOTED_2, 24, "rooted_jailbroken"},
+        {OFFSET_CHECKSUM, 64, "has-checksums"}
+    };
+    
+    for (auto& p : patches) {
+        uintptr_t addr = (uintptr_t)get_absolute_address(antiCheatLibName, p.offset);
+        std::vector<uint8_t> zeros(p.len, 0);
+        if (safe_mem_write(addr, zeros.data(), zeros.size())) {
+            write_log(g_antiCheatLog, "✅ " + std::string(p.name) + " cleared");
+            successCount++;
+        } else {
+            write_log(g_antiCheatLog, "❌ " + std::string(p.name) + " clear failed");
+        }
+    }
+    
+    write_log(g_antiCheatLog, "✅ Total patches applied: " + std::to_string(successCount) + "/" + std::to_string(total));
+    write_log(g_antiCheatLog, "========== DISABLE COMPLETE ==========\n");
+    
+    // دوباره وضعیت رو چک کن و به کاربر نشون بده
+    AntiCheatStatus newStatus = CheckAntiCheatStatus();
+    if (newStatus.ptrace_patched && newStatus.status_string_cleared) {
+        show_toast("🛡️ Anti-Cheat Disabled!");
+    } else {
+        show_toast("⚠️ Anti-Cheat partially disabled");
     }
 }
 
-// ======================== هوک GtaMenuControl.Start ========================
+// ======================== هوک‌های پایه (فقط برای گرفتن instance) ========================
 void (*orig_GtaMenuStart)(void *instance);
 void hook_GtaMenuStart(void *instance) {
-    if (instance && is_valid_address(instance)) {
+    if (instance) {
         g_gtaInstance = instance;
         if (!g_gameReady) {
             g_gameReady = true;
             write_debug("✅ Game ready!");
         }
     }
-    if (orig_GtaMenuStart) {
-        orig_GtaMenuStart(instance);
-    }
+    if (orig_GtaMenuStart) orig_GtaMenuStart(instance);
 }
 
-// ======================== نصب هوک‌ها ========================
-static void install_hooks_with_delay() {
-    write_debug("⏳ Waiting for game to load...");
-    
-    int waitCount = 0;
-    while (!isLibraryLoaded(targetLibName) && waitCount < MAX_WAIT) {
-        sleep(1);
-        waitCount++;
-    }
-    
-    if (waitCount >= MAX_WAIT) {
-        write_debug("❌ Timeout! libil2cpp.so not loaded!");
-        return;
-    }
-    write_debug("✅ libil2cpp.so loaded");
-    
-    waitCount = 0;
-    while (waitCount < MAX_WAIT) {
-        void* instance = get_gta_instance_safe();
-        if (instance && is_valid_address(instance)) {
-            g_gtaInstance = instance;
-            g_gameReady = true;
-            write_debug("✅ GtaMenuControl instance ready!");
-            break;
-        }
-        sleep(1);
-        waitCount++;
-    }
-    
-    if (!g_gameReady) {
-        write_debug("⚠️ No instance yet, will use hook");
-    }
-    
-#if defined(__aarch64__)
-    // هوک Button.Press (آفست 0x1F14A14)
-    void* pressAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F14A14"));
-    if (pressAddr && is_valid_address(pressAddr)) {
-        int res = DobbyHook(pressAddr, (dobby_dummy_func_t)hook_ButtonPress, (dobby_dummy_func_t*)&orig_ButtonPress);
-        if (res == 0) {
-            g_hookInstalled = true;
-            write_debug("✅ Button.Press hooked (0x1F14A14)");
-        } else {
-            write_debug("❌ Button.Press hook failed: " + std::to_string(res));
-        }
-    } else {
-        write_debug("❌ Button.Press address not found");
-    }
-    
-    // هوک GtaMenuControl.Start
-    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
-    if (startAddr && is_valid_address(startAddr)) {
+static void install_basic_hooks() {
+    void* startAddr = getAbsoluteAddress("libil2cpp.so", "0xF571A4");
+    if (startAddr) {
         DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
         write_debug("✅ GtaMenuControl.Start() hooked (passive)");
     }
-#endif
-    
-    write_debug("✅ Mod ready, waiting for user to enable capture");
-}
-
-// ======================== نمایش همه دکمه‌ها (بدون هوک) ========================
-static void ShowAllButtons() {
-    write_log(g_buttonsLog, "\n========== ALL BUTTONS ==========");
-    write_log(g_buttonsLog, "Time: " + get_time());
-    
-    void* instance = get_gta_instance_safe();
-    if (!instance || !is_valid_address(instance)) {
-        write_log(g_buttonsLog, "❌ No instance!");
-        write_log(g_buttonsLog, "========== DONE ==========\n");
-        return;
-    }
-    
-    void** menuButtons = *(void***)((uintptr_t)instance + 0x30);
-    if (!menuButtons || !is_valid_address(menuButtons)) {
-        write_log(g_buttonsLog, "❌ menuButtons is null!");
-        write_log(g_buttonsLog, "========== DONE ==========\n");
-        return;
-    }
-    
-    int found = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        uintptr_t btnAddr = (uintptr_t)menuButtons + (i * sizeof(void*));
-        if (!is_valid_address((void*)btnAddr)) break;
-        
-        void* btn = *(void**)btnAddr;
-        if (!btn || !is_valid_address(btn)) break;
-        
-        std::string name = get_button_name_safe(btn);
-        if (name.empty()) continue;
-        
-        write_log(g_buttonsLog, "  Button[" + std::to_string(i) + "] = " + name);
-        write_log(g_buttonsLog, "     Address: 0x" + std::to_string((uintptr_t)btn));
-        found++;
-    }
-    
-    write_log(g_buttonsLog, "\n✅ Total buttons found: " + std::to_string(found));
-    write_log(g_buttonsLog, "========== DONE ==========\n");
 }
 
 // ======================== منو ========================
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     g_env = env;
-    
     const char *features[] = {
-        "Category_🎯 Button Capture",
-        "Toggle_🔴 Enable Capture",
-        "Button_📋 Show All Buttons",
-        "Button_📊 Reset Counter",
-        "RichTextView_📁 Logs: /sdcard/Download/lac/",
+        "Category_🛡️ Anti-Cheat Tools",
+        "Button_📊 Check Anti-Cheat Status",
+        "Button_🔓 Disable Anti-Cheat",
+        "Button_📋 Show Logs Path",
+        "RichTextView_📁 /sdcard/Download/lac/",
+        "RichTextView_📌 anti_cheat_log.txt",
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = (jobjectArray)env->NewObjectArray(
@@ -432,41 +377,35 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
              jstring featName, jint value, jlong Lvalue, jboolean boolean, jstring text) {
-    
     g_env = env;
-    
     switch (featNum) {
         case 0:
-            g_captureEnabled = boolean;
-            if (g_captureEnabled) {
-                g_clickCounter = 0;
-                show_toast("🔴 Capture ON");
-                write_debug("🔴 Capture mode enabled");
-                write_log(g_clickLog, "📌 Capture: ON");
-            } else {
-                show_toast("⚫ Capture OFF");
-                write_debug("⚫ Capture mode disabled");
-                write_log(g_clickLog, "📌 Capture: OFF");
-            }
+            write_log(g_antiCheatLog, "🔘 Check Anti-Cheat pressed");
+            CheckAntiCheatStatus();
+            show_toast("📊 Check done! See log.");
             break;
-            
         case 1:
-            write_log(g_buttonsLog, "🔘 Show All Buttons pressed");
-            ShowAllButtons();
+            DisableAntiCheat();
             break;
-            
         case 2:
-            g_clickCounter = 0;
-            show_toast("🔄 Counter reset: 0");
-            write_log(g_clickLog, "📌 Counter reset to 0");
+            show_toast("📁 /sdcard/Download/lac/");
+            write_log(g_antiCheatLog, "📁 Logs path: " + g_basePath);
             break;
     }
 }
 
 // ======================== ترد اصلی ========================
 void hack_thread() {
-    install_hooks_with_delay();
-    write_debug("✅ hack_thread finished");
+    write_debug("⏳ Waiting for libil2cpp.so...");
+    while (!isLibraryLoaded("libil2cpp.so")) sleep(1);
+    write_debug("✅ libil2cpp.so loaded");
+    install_basic_hooks();
+    // صبر کن تا game ready بشه
+    for (int i = 0; i < 15; i++) {
+        if (g_gameReady) break;
+        sleep(1);
+    }
+    write_debug("✅ Mod ready");
 }
 
 // ======================== تابع ورودی ========================
