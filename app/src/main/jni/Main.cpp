@@ -19,7 +19,7 @@
 
 #define targetLibName OBFUSCATE("libil2cpp.so")
 
-// ======================== آفست‌ها ========================
+// ======================== آفست‌های جدید از Dump5 ========================
 #define OFFSET_GTA_GET_INSTANCE         0xF570C4
 #define OFFSET_GTA_START                0xF571A4
 #define OFFSET_OBJECT_GET_NAME          0x1E7CE6C
@@ -39,10 +39,10 @@ static std::string g_debugLog = g_basePath + "mod_debug.txt";
 static bool g_crashHandlerInstalled = false;
 static bool g_gameReady = false;
 static bool g_captureEnabled = false;
+static bool g_hooksInstalled = false;
 static void* g_gtaInstance = nullptr;
 static JNIEnv* g_env = nullptr;
 static int g_clickCounter = 0;
-static bool g_hooks_installed = false;
 
 // ====== پوینتر تابع اصلی ======
 void (*orig_OnPointerClick)(void* button, void* eventData);
@@ -92,7 +92,6 @@ static void show_toast(const std::string& msg) {
         return;
     }
     
-    // گرفتن Application Context
     jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
     if (!activityThreadClass) {
         env->ExceptionClear();
@@ -157,7 +156,7 @@ static void show_toast(const std::string& msg) {
     env->DeleteLocalRef(activityThread);
 }
 
-// ======================== کرش‌گیر ========================
+// ======================== کرش‌گیر کامل ========================
 static void crash_handler(int sig, siginfo_t *info, void *context) {
     std::ofstream f(g_crashLog, std::ios::app);
     if (!f.is_open()) return;
@@ -204,7 +203,7 @@ static bool is_valid_address(void* addr) {
     return map.readable;
 }
 
-// ======================== توابع IL2CPP ========================
+// ======================== توابع IL2CPP امن ========================
 static void* create_mono_string(const char* str) {
     if (!str) return nullptr;
     typedef void* (*il2cpp_string_new_t)(const char*);
@@ -284,63 +283,67 @@ void hook_OnPointerClick(void* button, void* eventData) {
             write_log(g_clickLog, "   Button: 0x" + std::to_string((uintptr_t)button));
         }
     }
-    if (orig_OnPointerClick) orig_OnPointerClick(button, eventData);
-}
-
-// ======================== هوک GtaMenuControl.Start ========================
-void (*orig_GtaMenuStart)(void *instance);
-void hook_GtaMenuStart(void *instance) {
-    if (instance && is_valid_address(instance)) {
-        g_gtaInstance = instance;
-        if (!g_gameReady) {
-            g_gameReady = true;
-            write_debug("✅ Game ready!");
-        }
+    if (orig_OnPointerClick) {
+        orig_OnPointerClick(button, eventData);
     }
-    if (orig_GtaMenuStart) orig_GtaMenuStart(instance);
 }
 
-// ======================== نصب هوک‌ها (فقط وقتی Capture روشن بشه) ========================
+// ======================== نصب هوک (فقط یک بار) ========================
 static void install_hooks_once() {
-    if (g_hooks_installed) return;
+    if (g_hooksInstalled) return;
     
 #if defined(__aarch64__)
-    // OnPointerClick
     void* addr = getAbsoluteAddress(targetLibName, OBFUSCATE("0x1F14A4C"));
     if (addr && is_valid_address(addr)) {
-        if (DobbyHook(addr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick) == 0) {
-            g_hooks_installed = true;
-            write_debug("✅ OnPointerClick hooked (0x1F14A4C)");
+        int res = DobbyHook(addr, (dobby_dummy_func_t)hook_OnPointerClick, (dobby_dummy_func_t*)&orig_OnPointerClick);
+        if (res == 0) {
+            g_hooksInstalled = true;
+            write_debug("✅ OnPointerClick hooked successfully");
+        } else {
+            write_debug("❌ OnPointerClick hook failed: " + std::to_string(res));
         }
-    }
-    
-    // GtaMenuControl.Start
-    void* startAddr = getAbsoluteAddress(targetLibName, OBFUSCATE("0xF571A4"));
-    if (startAddr && is_valid_address(startAddr)) {
-        DobbyHook(startAddr, (dobby_dummy_func_t)hook_GtaMenuStart, (dobby_dummy_func_t*)&orig_GtaMenuStart);
+    } else {
+        write_debug("❌ OnPointerClick address not found");
     }
 #endif
 }
 
-// ======================== ترد اصلی (فقط لاگ میگیره و منتظر میمونه) ========================
+// ======================== ترد اصلی (سبک و بدون حلقه‌ی بی‌نهایت) ========================
 void hack_thread() {
-    write_debug("⏳ Mod loaded, waiting for user to enable capture...");
+    write_debug("⏳ Mod loaded, waiting for game...");
     
-    // فقط صبر کن تا بازی لود بشه و هیچ هوکی نزن!
-    while (!isLibraryLoaded(targetLibName)) {
+    // ۱. منتظر لود شدن libil2cpp.so
+    int waitCount = 0;
+    while (!isLibraryLoaded(targetLibName) && waitCount < MAX_WAIT) {
         sleep(1);
+        waitCount++;
     }
     
-    write_debug("✅ libil2cpp.so loaded (capture disabled, waiting for user)");
+    if (waitCount >= MAX_WAIT) {
+        write_debug("❌ Timeout waiting for libil2cpp.so");
+        return;
+    }
+    write_debug("✅ libil2cpp.so loaded");
     
-    // منتظر بمون تا کاربر Capture رو روشن کنه (هیچ کاری نکن!)
-    while (true) {
-        // فقط هر 5 ثانیه چک کن که instance آماده شده یا نه (فقط برای زمانیکه کاربر روشن کنه)
-        if (!g_gtaInstance) {
-            get_gta_instance_safe();
+    // ۲. منتظر آماده شدن GtaMenuControl instance (بدون هیچ هوکی)
+    waitCount = 0;
+    while (waitCount < MAX_WAIT) {
+        void* instance = get_gta_instance_safe();
+        if (instance && is_valid_address(instance)) {
+            g_gtaInstance = instance;
+            g_gameReady = true;
+            write_debug("✅ GtaMenuControl instance ready!");
+            break;
         }
-        sleep(5);
+        sleep(1);
+        waitCount++;
     }
+    
+    if (!g_gameReady) {
+        write_debug("⚠️ GtaMenuControl instance not ready, but will try later when capture enabled");
+    }
+    
+    write_debug("✅ Mod ready, waiting for user to enable capture");
 }
 
 // ======================== منو ========================
@@ -370,38 +373,46 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum,
     g_env = env;
     
     switch (featNum) {
-        case 0:
+        case 0: {
             g_captureEnabled = boolean;
             
             if (boolean) {
-                // ====== فقط وقتی کاربر روشن کرد، هوک نصب کن ======
+                // فقط وقتی کاربر روشن کرد، هوک نصب کن
                 install_hooks_once();
                 
                 // اگر instance آماده نبود، دوباره بگیر
                 if (!g_gtaInstance) {
-                    get_gta_instance_safe();
-                    if (g_gtaInstance) {
+                    void* instance = get_gta_instance_safe();
+                    if (instance && is_valid_address(instance)) {
+                        g_gtaInstance = instance;
                         g_gameReady = true;
-                        write_debug("✅ GtaMenuControl instance ready!");
+                        write_debug("✅ GtaMenuControl instance captured on enable");
                     }
                 }
                 
-                g_clickCounter = 0;
-                show_toast("🔴 Capture ON");
-                write_debug("🔴 Capture mode enabled");
-                write_log(g_clickLog, "📌 Capture: ON");
+                if (!g_gameReady) {
+                    write_debug("⚠️ GtaMenuControl instance not ready yet, capture may not work");
+                    show_toast("⚠️ Game not ready, try again later");
+                } else {
+                    g_clickCounter = 0;
+                    show_toast("🔴 Capture ON");
+                    write_debug("🔴 Capture mode enabled");
+                    write_log(g_clickLog, "📌 Capture: ON");
+                }
             } else {
                 show_toast("⚫ Capture OFF");
                 write_debug("⚫ Capture mode disabled");
                 write_log(g_clickLog, "📌 Capture: OFF");
             }
             break;
-            
-        case 1:
+        }
+        
+        case 1: {
             g_clickCounter = 0;
             show_toast("🔄 Counter reset: 0");
             write_log(g_clickLog, "📌 Counter reset to 0");
             break;
+        }
     }
 }
 
